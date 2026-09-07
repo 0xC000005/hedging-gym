@@ -30,6 +30,8 @@ from hedging_gym.gym_env import TensorHedgingEnv
 
 from .policies import _ConfiguredPolicy, _network
 from .training import _report, _sync
+from .checkpoints import (check_resume_options, due_checkpoint, load_checkpoint,
+                          restore_rng, rng_state, save_checkpoint)
 
 
 def holding_grid(config, points=3):
@@ -87,8 +89,10 @@ class AlphaZeroPolicy(_ConfiguredPolicy):
         grid = self.targets.to(positions)[None].expand(len(positions), -1, -1)
         candidates = torch.cat((grid, positions[:, None]), dim=1)
         legal = finance.feasible_targets(positions[:, None], candidates, config).all(-1)
-        # A dedicated HOLD avoids double prior mass for the identical grid row.
-        legal[:, :-1] &= (grid != positions[:, None]).any(-1)
+        # Absolute grid actions keep their identity when inventory is unchanged,
+        # as in the donor. Mask the redundant HOLD, not the matching grid action;
+        # otherwise a persistent grid preference is forced into needless trades.
+        legal[:, -1] &= ~(grid == positions[:, None]).all(-1).any(-1)
         return candidates, legal
 
 
@@ -323,7 +327,8 @@ def alphazero_controller(policy, *, simulations=32, seed=30001, c_puct=1., progr
 
 def train_alphazero(train_bank, *, seed=7, updates=8, batch_size=16, hidden=(32, 32),
                    learning_rate=1e-3, device="cpu", simulations=32, grid_points=3,
-                   targets=None, gradient_steps=4, replay_batches=4, c_puct=1., progress=True):
+                   targets=None, gradient_steps=4, replay_batches=4, c_puct=1., progress=True,
+                   checkpoint_path=None, checkpoint_every=4, resume_from=None):
     """Full single-agent search/improvement loop on the supplied training bank.
 
     Each iteration collects complete episodes under visit-sampled search,
@@ -332,8 +337,10 @@ def train_alphazero(train_bank, *, seed=7, updates=8, batch_size=16, hidden=(32,
     Exogenous training paths are used only for live episode steps; planning
     generates independent conditional paths via the same financial model.
     ``updates`` counts self-play batches, not neural optimizer steps.
+    Checkpoints contain the optimizer, rolling replay, ES threshold and every
+    random stream; resuming extends self-play without discarding learned state.
     """
-    if min(updates, batch_size, simulations, gradient_steps, replay_batches) < 1:
+    if min(updates, batch_size, simulations, gradient_steps, replay_batches, checkpoint_every) < 1:
         raise ValueError("training/search/replay work must be positive")
     total_started = time.perf_counter()
     config, device = train_bank.config, torch.device(device)
@@ -349,14 +356,34 @@ def train_alphazero(train_bank, *, seed=7, updates=8, batch_size=16, hidden=(32,
     action_rng = torch.Generator(device=device).manual_seed(seed+200003)
     search_rng = np.random.default_rng(seed+300003)
     replay, history = deque(maxlen=replay_batches), []
-    started = time.perf_counter()
+    options = dict(updates=updates, batch_size=batch_size, simulations=simulations,
+                   gradient_steps=gradient_steps, replay_batches=replay_batches,
+                   hidden=list(hidden), grid_points=grid_points, learning_rate=learning_rate,
+                   c_puct=c_puct, action_targets=policy.targets.cpu().tolist(),
+                   action_encoding="absolute_grid_with_off_grid_hold")
+    start_step, previous_seconds = 0, 0.
     work = dict(transition_samples=0, network_rows=0, terminal_evaluations=0, maximum_depth=0)
+    if resume_from is not None:
+        saved = load_checkpoint(resume_from, method="alphazero", config=config)
+        check_resume_options(saved, options)
+        if saved["seed"] != seed or saved["step"] > updates:
+            raise ValueError("resume requires the saved seed and at least its completed updates")
+        policy.load_state_dict(saved["policy"])
+        optimizer.load_state_dict(saved["optimizer"])
+        replay.extend(tuple(value.to(device) for value in block) for block in saved["replay"])
+        history, work = saved["history"], saved["work"]
+        index_rng.set_state(saved["index_rng"])
+        action_rng.set_state(saved["action_rng"])
+        search_rng.bit_generator.state = saved["search_rng"]
+        restore_rng(saved["rng"])
+        start_step, previous_seconds = saved["step"], saved["training_seconds"]
+    started = time.perf_counter()
     if progress:
         _report("train_start", method="alphazero", seed=seed, device=str(device),
                 updates=updates, batch_size=batch_size, simulations=simulations,
                 dates=config.n_steps, actions=len(policy.targets)+1,
-                expected_root_searches=updates*batch_size*config.n_steps)
-    for update in range(1, updates+1):
+                expected_root_searches=updates*batch_size*config.n_steps, resumed_step=start_step)
+    for update in range(start_step+1, updates+1):
         indices = torch.randint(len(bank.spot), (batch_size,), generator=index_rng).to(device)
         env = TensorHedgingEnv(finance.bank_subset(bank, indices))
         observed = env.reset()
@@ -381,11 +408,11 @@ def train_alphazero(train_bank, *, seed=7, updates=8, batch_size=16, hidden=(32,
                     work["maximum_depth"] = max(work["maximum_depth"], item["work"]["maximum_depth"])
                 observed, _, _, _, info = env.step(candidates[torch.arange(batch_size, device=device), actions])
                 if progress and (date == 0 or (date+1) % 5 == 0 or date+1 == config.n_steps):
-                    completed = (update-1)*config.n_steps + date+1
+                    completed = (update-start_step-1)*config.n_steps + date+1
                     elapsed = time.perf_counter()-started
                     _report("az_self_play", update=update, updates=updates, date=date+1,
                             dates=config.n_steps, elapsed_seconds=elapsed,
-                            eta_seconds=elapsed*(updates*config.n_steps-completed)/completed)
+                            eta_seconds=elapsed*((updates-start_step)*config.n_steps-completed)/completed)
             terminal_loss = info["terminal_loss"]
             costs = config.risk.loss(terminal_loss, fixed_zeta)
             replay.append((torch.cat(features), torch.cat(target_policies), torch.cat(masks),
@@ -405,24 +432,29 @@ def train_alphazero(train_bank, *, seed=7, updates=8, batch_size=16, hidden=(32,
             # Coordinate minimization in zeta, after (never during) self-play.
             policy.zeta.copy_(torch.quantile(terminal_loss, config.risk.alpha))
         _sync(device)
-        elapsed = time.perf_counter()-started
+        segment_elapsed = time.perf_counter()-started
+        elapsed = previous_seconds+segment_elapsed
         record = dict(completed=update, total=updates, elapsed_seconds=elapsed,
-                      eta_seconds=elapsed*(updates-update)/update, policy_loss=float(policy_loss.detach()),
+                      eta_seconds=segment_elapsed*(updates-update)/(update-start_step), policy_loss=float(policy_loss.detach()),
                       value_loss=float(value_loss.detach()), zeta=float(policy.zeta), **work)
         history.append(record)
         if progress:
             _report("train_progress", method="alphazero", **record)
+        if checkpoint_path is not None and due_checkpoint(update, updates, checkpoint_every):
+            save_checkpoint(checkpoint_path, dict(method="alphazero", config=asdict(config),
+                options=options, seed=seed, step=update, policy=policy.state_dict(),
+                optimizer=optimizer.state_dict(), replay=list(replay), history=history,
+                work=work, index_rng=index_rng.get_state(), action_rng=action_rng.get_state(),
+                search_rng=search_rng.bit_generator.state, rng=rng_state(), training_seconds=elapsed))
     policy.eval()
     return policy, dict(method="alphazero", method_label="Stochastic AlphaZero adaptation",
             source_repo="plan64/minimalHedger_AlphaZero", source_commit="3111c378fcd17e45f94d2fc668a3aa117126ecba",
             classification="common_environment_adaptation_not_paper_reproduction", seed=seed,
             config=asdict(config), device=str(device), zeta=float(policy.zeta), history=history,
             initialization_seconds=started-total_started,
-            training_seconds=time.perf_counter()-started, total_seconds=time.perf_counter()-total_started,
-            options=dict(updates=updates,
-                batch_size=batch_size, simulations=simulations, gradient_steps=gradient_steps,
-                replay_batches=replay_batches, hidden=list(hidden), grid_points=grid_points,
-                learning_rate=learning_rate, c_puct=c_puct),
+            training_seconds=previous_seconds+time.perf_counter()-started,
+            total_seconds=previous_seconds+time.perf_counter()-total_started,
+            options=options, resumed_step=start_step,
             action_targets=policy.targets.cpu().tolist(), hold_action=len(policy.targets),
             expected_episode_rollouts=updates*batch_size, optimizer_steps=updates*gradient_steps,
             parameter_count=sum(p.numel() for p in policy.parameters()), work=work)

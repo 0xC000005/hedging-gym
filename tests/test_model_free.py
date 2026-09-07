@@ -11,7 +11,7 @@ from hedging_gym.evaluation import evaluate_controller
 from hedging_gym.finance import generate_market_bank
 from methods.controllers import policy_controller
 from methods.model_free import (DistributionalCritic, collect_episodes,
-    gpd_expected_excess, gpd_nll, quantile_huber_loss, train_model_free)
+    _accumulated_cost, gpd_expected_excess, gpd_nll, quantile_huber_loss, train_model_free)
 from methods.policies import DirectDHPolicy
 
 
@@ -83,3 +83,46 @@ def test_model_free_updates_detached_environment_and_common_evaluation(method, s
     assert metrics["constraint_violations"] == 0
     assert torch.isfinite(tape["terminal_loss"]).all()
     assert policy.n_assets == config.n_assets
+
+
+@pytest.mark.parametrize("method", ["hull_rl", "exdrl"])
+def test_model_free_checkpoint_resume_matches_uninterrupted_training(tmp_path, method):
+    config = benchmark_config(model="gbm", time_grid=TimeGrid(n_steps=3))
+    bank = generate_market_bank(config, 24, 811, dtype=torch.float64)
+    options = dict(seed=7, batch_size=8, hidden=(8,), quantiles=32,
+                   tail_threshold=.8, gradient_steps=2, replay_capacity=256, progress=False,
+                   dense_rewards=method == "exdrl")
+    full_path, split_path = tmp_path/"full.pt", tmp_path/"split.pt"
+    full, _ = train_model_free(method, bank, updates=4, checkpoint_path=full_path, **options)
+    train_model_free(method, bank, updates=2, checkpoint_path=split_path, **options)
+    resumed, _ = train_model_free(method, bank, updates=4, checkpoint_path=split_path,
+                                  resume_from=split_path, **options)
+    for actual, expected in zip(resumed.parameters(), full.parameters()):
+        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+    actual = torch.load(split_path, weights_only=False)
+    expected = torch.load(full_path, weights_only=False)
+    for name in ("critic", "target_critic", "target_actor"):
+        for key, tensor in actual[name].items():
+            if isinstance(tensor, torch.Tensor):
+                torch.testing.assert_close(tensor, expected[name][key], rtol=0, atol=0)
+    assert actual["replay"]["cursor"] == expected["replay"]["cursor"]
+    assert (tmp_path/"split-early.pt").exists()
+
+
+def test_dense_rewards_preserve_terminal_loss_and_global_ru():
+    config = benchmark_config(model="gbm", time_grid=TimeGrid(n_steps=3))
+    bank = generate_market_bank(config, 24, 811, dtype=torch.float64)
+    actor = DirectDHPolicy(config, hidden=(8,)).double()
+    transitions, losses, _ = collect_episodes(actor, bank, n_step=1, dense_rewards=True)
+    torch.testing.assert_close(transitions[2].reshape(24,3).sum(-1), losses)
+    complete, _, _ = collect_episodes(actor, bank, n_step=3, dense_rewards=True)
+    accumulated = _accumulated_cost(complete[0], actor, config, bank.liability[0,0])
+    # L = accumulated + remaining. The transformed threshold is zeta-accumulated;
+    # never optimize a separate conditional ES at each date.
+    remaining = complete[2]
+    threshold = losses.new_tensor(.015, requires_grad=True)
+    transformed = accumulated + config.risk.loss(remaining, threshold-accumulated)
+    original = config.risk.loss(losses[:,None].expand(-1,3).flatten(),threshold)
+    torch.testing.assert_close(transformed,original)
+    torch.testing.assert_close(torch.autograd.grad(transformed.mean(),threshold,retain_graph=True)[0],
+                               torch.autograd.grad(original.mean(),threshold)[0])

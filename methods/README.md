@@ -11,6 +11,7 @@ outside it.
 | `controllers.py` | Common evaluation interface for classical controls and frozen policies |
 | `policies.py` | Direct bounded holdings and learned no-transaction bands |
 | `training.py` | Causal rollouts and a shared terminal expected-shortfall objective |
+| `checkpoints.py` | Trusted-local snapshot files and RNG state; each learner owns its training state |
 | `model_free.py` | Quantile D4PG and EX-D4PG with a generalized-Pareto tail |
 | `adaptation.py` | Full-network fine-tuning and task-embedding adaptation |
 | `alphazero.py` | Stochastic PUCT, learned policy/value and search-improvement training |
@@ -113,6 +114,16 @@ participates in both targets and actor optimization. A single global threshold
 keeps their objective aligned with the other methods rather than silently
 changing to a different conditional-tail objective at each date.
 
+For substantive RL training, use `experiments/qualify_model_free.py`, not the
+eight-update integration recipe. Its source-aligned settings include exploratory
+replay warmup, Adam at `1e-4`, and 32 replay samples per newly collected
+transition. `dense_rewards=True` trains on changes in marked hedge wealth;
+these telescope to the same terminal loss. Shifting the global risk threshold
+by accumulated loss preserves the terminal ES objective. The intermediate
+labels are detached: the actor still learns through its critic, not through
+financial accounting gradients. This helps conditioning; it does not guarantee
+a calibrated critic or a superior hedge.
+
 HPO retains the gradient through earlier sizing into later categorical-choice
 probabilities. Extra PPO passes detach those histories; no straight-through
 trade/no-trade gradient is substituted. It uses complete Monte Carlo returns,
@@ -146,11 +157,39 @@ particular, one `update` means a DH optimizer step, an RL collection plus replay
 updates, or an AlphaZero self-play batch plus training. Equal update counts do
 **not** mean equal compute. Saved metadata records their actual work and time.
 
-The runner saves initial policy weights, configuration, held-out market bank and
-trade tapes. Adaptation results and final adapted policies are separate files;
-these are evaluation checkpoints, not exact optimizer/RNG resumption snapshots.
-Keep output directories outside the repository. Training thresholds are retained,
-but final ES is always measured from actual held-out losses, not critic outputs.
+The runner's `--output-dir` saves initial policy weights, configuration, held-out
+market bank and trade tapes. Adaptation results and final adapted policies are
+separate files. Final ES is measured from actual held-out losses, not critics.
+
+### Checkpoint and resume training
+
+Use `--checkpoint-dir` to retain full training state during a run, independently
+of the final evaluation output. Each learner saves `latest.pt` after its first
+update, every `--checkpoint-every` updates and at completion; `latest-early.pt`
+preserves its first update. A snapshot includes the policy, relevant critics and
+targets, optimizers, risk threshold, replay where used, RNG state and completed
+work. The latest file is replaced atomically. These are trusted local PyTorch
+files: do not load checkpoints from an untrusted source.
+
+`--resume-from` resumes one selected method. Keep its original training bank,
+configuration, seed and recipe; `--updates` specifies the new **total**, not an
+additional number of steps. Only the total may be extended. Exact split/resume
+checks cover same-device training; moving between CPU and GPU is not a promise
+of bit-identical trajectories.
+
+The Python trainers expose `checkpoint_path`, `checkpoint_every` and
+`resume_from`. Chronological adaptation has a separate
+`AdaptationUpdater.state_dict()` / `load_state_dict()` including a partially
+completed update call. Save each stage separately so returning to A does not
+overwrite its earlier evidence.
+
+For repeated qualification on saved banks, see
+`experiments/qualify_policies.py`, `qualify_adaptation.py`,
+`qualify_model_free.py`, `qualify_alphazero.py` and `qualify_search.py`. These are experiment entry points,
+not another training framework. Keep all banks, curves, checkpoints and trade
+tapes outside the repository. A completed run is not automatically a qualified
+competitive baseline; inspect actual hedges and development risk before a final
+comparison.
 
 ### Operational and adaptation comparisons
 

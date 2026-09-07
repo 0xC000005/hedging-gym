@@ -14,8 +14,8 @@ import torch
 
 from hedging_gym.evaluation import evaluate_controller
 from hedging_gym.benchmark import benchmark_config, evaluate_adaptation
-from hedging_gym.config import RiskConfig, TimeGrid
-from hedging_gym.finance import BANK_FIELDS, generate_market_bank
+from hedging_gym.config import RiskConfig, TimeGrid, config_from_dict
+from hedging_gym.finance import BANK_FIELDS, MarketBank, generate_market_bank
 
 from methods.controllers import classical_controller, policy_controller
 from methods.training import _report, train_policy
@@ -46,7 +46,13 @@ def _parser():
                         choices=("basic", "operational_fixed", "operational_minimum_fee"))
     parser.add_argument("--train-paths", type=int, default=128)
     parser.add_argument("--eval-paths", type=int, default=128)
+    parser.add_argument("--train-bank", type=Path, help="reuse a trusted saved bank with the same configuration")
+    parser.add_argument("--eval-bank", type=Path, help="reuse a separate saved development/evaluation bank")
     parser.add_argument("--updates", type=int, default=8)
+    parser.add_argument("--learning-rate", type=float, default=1e-3)
+    parser.add_argument("--checkpoint-dir", type=Path, help="periodic complete training snapshots outside Git")
+    parser.add_argument("--checkpoint-every", type=int, default=200)
+    parser.add_argument("--resume-from", type=Path, help="resume one selected method on its original training bank")
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--steps", type=int, default=TimeGrid().n_steps)
     parser.add_argument("--days-per-year", type=int, choices=(252, 365, 360),
@@ -86,6 +92,13 @@ def _build_bank(config, paths, seed, device, stage):
     return bank, time.perf_counter()-started
 
 
+def _load_bank(path, config, seed, device):
+    saved = torch.load(path, map_location=device, weights_only=False)
+    if config_from_dict(saved["config"]) != config or saved["seed"] != seed:
+        raise ValueError("saved bank configuration/seed differs from the declared run")
+    return MarketBank(*(saved[key] for key in BANK_FIELDS), config)
+
+
 def main(argv=None):
     args = _parser().parse_args(argv)
     if min(args.train_paths, args.eval_paths, args.updates, args.batch_size, args.steps, args.threads,
@@ -116,18 +129,33 @@ def main(argv=None):
             train_paths=args.train_paths, eval_paths=args.eval_paths,
             expected_training_episode_rollouts=len(training_methods)*args.updates*args.batch_size,
             expected_evaluated_policies=4+len(methods), delta_band=args.delta_band)
-    train_bank, train_bank_seconds = _build_bank(config, args.train_paths, args.train_seed,
-                                                 args.device, "training_bank")
+    if args.resume_from and len(training_methods) != 1:
+        raise ValueError("resume one method at a time using its saved training state")
+    if args.train_bank:
+        bank_start = time.perf_counter()
+        train_bank = _load_bank(args.train_bank, config, args.train_seed, args.device)
+        if len(train_bank.spot) != args.train_paths:
+            raise ValueError("--train-paths must match the saved bank")
+        train_bank_seconds = time.perf_counter() - bank_start
+    else:
+        train_bank, train_bank_seconds = _build_bank(config, args.train_paths, args.train_seed,
+                                                     args.device, "training_bank")
     policies, training, extra_bank_seconds = {}, {}, 0.
     options = dict(seed=args.seed, updates=args.updates, batch_size=args.batch_size,
-                   hidden=tuple(args.hidden), device=args.device)
+                   hidden=tuple(args.hidden), device=args.device, learning_rate=args.learning_rate)
     for method in training_methods:
+        method_options = dict(options)
+        if args.checkpoint_dir:
+            method_options.update(checkpoint_path=args.checkpoint_dir / f"{method}-seed{args.seed}" / "latest.pt",
+                                  checkpoint_every=args.checkpoint_every)
+        if args.resume_from:
+            method_options["resume_from"] = args.resume_from
         if method in ("dh", "ntb"):
-            pair = train_policy(method, train_bank, **options)
+            pair = train_policy(method, train_bank, **method_options)
         elif method in ("hull_rl", "exdrl"):
-            pair = train_model_free(method, train_bank, **options)
+            pair = train_model_free(method, train_bank, **method_options)
         elif method == "finetune_dh":
-            pair = train_online_finetune(train_bank, **options)
+            pair = train_online_finetune(train_bank, **method_options)
         elif method == "adaptive_dh":
             # A nearby source market, not evaluation regime B (.09 variance).
             changes = dict(v0=config.market.v0 * .8)
@@ -137,16 +165,23 @@ def main(argv=None):
             source_bank, seconds = _build_bank(source_config, args.train_paths,
                 args.train_seed + 100000, args.device, "multitask_source_bank")
             extra_bank_seconds += seconds
-            pair = train_multitask((train_bank, source_bank), **options)
+            pair = train_multitask((train_bank, source_bank), **method_options)
         elif method == "alphazero":
             pair = train_alphazero(train_bank, simulations=args.search_simulations,
-                                   grid_points=args.grid_points, **options)
+                                   grid_points=args.grid_points, **method_options)
         else:
-            pair = train_hybrid(train_bank, **options)
+            pair = train_hybrid(train_bank, **method_options)
         policies[method], training[method] = pair
     # This bank is generated only after all policy updates have completed.
-    heldout, eval_bank_seconds = _build_bank(config, args.eval_paths, args.eval_seed,
-                                             args.device, "heldout_bank")
+    if args.eval_bank:
+        bank_start = time.perf_counter()
+        heldout = _load_bank(args.eval_bank, config, args.eval_seed, args.device)
+        if len(heldout.spot) != args.eval_paths:
+            raise ValueError("--eval-paths must match the saved bank")
+        eval_bank_seconds = time.perf_counter() - bank_start
+    else:
+        heldout, eval_bank_seconds = _build_bank(config, args.eval_paths, args.eval_seed,
+                                                 args.device, "heldout_bank")
     controllers = {
         "delta": classical_controller("delta"),
         "delta_band": classical_controller("delta", band=args.delta_band),
@@ -178,13 +213,14 @@ def main(argv=None):
             zeta=training[name]["zeta"] if name in training else None)
         _report("heldout_result", method=name, eval_seed=args.eval_seed, **evaluations[name])
     summary = dict(label="Baseline comparison",
-                   config=asdict(config), arguments={**vars(args), "output_dir": str(args.output_dir) if args.output_dir else None},
+                   config=asdict(config), arguments={key: str(value) if isinstance(value, Path) else value
+                                                    for key, value in vars(args).items()},
                    training=training, evaluation=evaluations,
                    planning={name: planner.metadata() for name, planner in planners.items()},
                    training_bank_seconds=train_bank_seconds, extra_training_bank_seconds=extra_bank_seconds,
                    heldout_bank_seconds=eval_bank_seconds,
                    comparison_seconds_before_adaptation=time.perf_counter()-started,
-                   scope="Small integration run with one training seed; not comparative research evidence",
+                   scope="Development comparison with one training seed; not a final performance ranking",
                    execution="Continuous methods: bounds/fees supported; lots and minimum orders require discrete action adapters",
                    adaptation={})
     if "alphazero" in controllers:

@@ -9,6 +9,7 @@ PPO on detached histories. This is a compact finite-horizon ES adaptation, not
 an import of the donor's inventory features, GAE defaults or LQR experiment.
 """
 import time
+from dataclasses import asdict
 
 import torch
 from torch import nn
@@ -18,6 +19,8 @@ from hedging_gym.finance import bank_subset, bank_to
 from hedging_gym.gym_env import TensorHedgingEnv
 from .policies import _ConfiguredPolicy, _network, _bounds, PolicyAction, HOLD, BUY, SELL
 from .training import _report, _sync
+from .checkpoints import (save_checkpoint, load_checkpoint, rng_state, restore_rng,
+                          check_resume_options, due_checkpoint)
 
 
 class HybridPolicy(_ConfiguredPolicy):
@@ -86,7 +89,8 @@ def hybrid_rollout(policy, bank, *, generator=None, deterministic=False):
 
 def train_hybrid(train_bank, *, seed=7, updates=8, batch_size=32, hidden=(32, 32),
                  learning_rate=1e-3, zeta_learning_rate=3e-4, ppo_epochs=4,
-                 clip_ratio=.2, entropy_coefficient=.001, device="cpu", progress=True):
+                 clip_ratio=.2, entropy_coefficient=.001, device="cpu", progress=True,
+                 checkpoint_path=None, checkpoint_every=200, resume_from=None):
     """Train categorical exploration and conditional pathwise sizing jointly.
 
     Gamma=lambda=1 gives complete Monte Carlo returns and zero value at expiry.
@@ -94,7 +98,7 @@ def train_hybrid(train_bank, *, seed=7, updates=8, batch_size=32, hidden=(32, 32
     epochs update scores/value only: continuous histories are now fixed data.
     Optimizer settings are recorded, not represented as the author's defaults.
     """
-    if min(updates, batch_size, ppo_epochs) < 1 or min(learning_rate, zeta_learning_rate) <= 0:
+    if min(updates, batch_size, ppo_epochs, checkpoint_every) < 1 or min(learning_rate, zeta_learning_rate) <= 0:
         raise ValueError("training budgets and learning rates must be positive")
     config = train_bank.config
     if any(config.execution.vector("minimum_trade", config.n_assets)
@@ -116,12 +120,27 @@ def train_hybrid(train_bank, *, seed=7, updates=8, batch_size=32, hidden=(32, 32
     if progress:
         _report("train_start", method="hpo", seed=seed, device=str(device), options=options,
                 expected_episode_rollouts=updates * batch_size, n_modes=policy.n_modes)
-    with torch.no_grad():
-        initial = bank_subset(bank, slice(0, min(1024, len(bank.spot))))
-        losses = hybrid_rollout(policy, initial, generator=sampler)[0]["terminal_loss"]
-        zeta.copy_(torch.quantile(losses, config.risk.alpha))
-    history = []
-    for update in range(1, updates + 1):
+    first_step, previous_seconds, history = 0, 0., []
+    if resume_from:
+        saved = load_checkpoint(resume_from, method="hpo", config=config)
+        check_resume_options(saved, options)
+        if saved["seed"] != seed or saved["training_paths"] != len(bank.spot):
+            raise ValueError("resume requires the original seed and frozen training bank")
+        policy.load_state_dict(saved["policy"])
+        with torch.no_grad():
+            zeta.copy_(saved["zeta"])
+        optimizer.load_state_dict(saved["optimizer"])
+        threshold_optimizer.load_state_dict(saved["threshold_optimizer"])
+        sampler.set_state(saved["sampler_rng"])
+        restore_rng(saved["rng"])
+        first_step, history = saved["step"], saved["history"]
+        previous_seconds = saved["elapsed_seconds"]
+    else:
+        with torch.no_grad():
+            initial = bank_subset(bank, slice(0, min(1024, len(bank.spot))))
+            losses = hybrid_rollout(policy, initial, generator=sampler)[0]["terminal_loss"]
+            zeta.copy_(torch.quantile(losses, config.risk.alpha))
+    for update in range(first_step + 1, updates + 1):
         indices = torch.randint(len(bank.spot), (batch_size,), device=device, generator=sampler)
         result, observed, modes, log_probs, entropies = hybrid_rollout(
             policy, bank_subset(bank, indices), generator=sampler)
@@ -169,15 +188,23 @@ def train_hybrid(train_bank, *, seed=7, updates=8, batch_size=32, hidden=(32, 32
             _sync(device)
             elapsed = time.perf_counter() - started
             record = dict(completed=update, total=updates, elapsed_seconds=elapsed,
-                          eta_seconds=elapsed * (updates - update) / update,
+                          eta_seconds=elapsed * (updates - update) / (update-first_step),
                           batch_risk_loss=float(risk_cost.detach().mean()),
                           zeta=float(zeta.detach()), extra_ppo_epochs=extra_epochs)
             history.append(record)
             if progress:
                 _report("train_progress", method="hpo", **record)
+        if checkpoint_path and due_checkpoint(update, updates, checkpoint_every):
+            save_checkpoint(checkpoint_path, dict(method="hpo", config=asdict(config),
+                seed=seed, options=options, step=update, policy=policy.state_dict(),
+                optimizer=optimizer.state_dict(), threshold_optimizer=threshold_optimizer.state_dict(),
+                zeta=zeta.detach(), rng=rng_state(), sampler_rng=sampler.get_state(),
+                history=history, training_paths=len(bank.spot),
+                elapsed_seconds=previous_seconds+time.perf_counter()-started))
     _sync(device)
     return policy, dict(method="hpo", seed=seed, device=str(device), options=options,
-        zeta=float(zeta.detach()), history=history, total_seconds=time.perf_counter() - started,
+        zeta=float(zeta.detach()), history=history, total_seconds=previous_seconds+time.perf_counter() - started,
+        resumed_from=str(resume_from) if resume_from else None, resumed_step=first_step,
         expected_episode_rollouts=updates * batch_size, initialization_paths=min(1024, len(bank.spot)),
         source="MatiasAlvo/hybrid-rl@e48ae86da1e8f14c93cbb56e48d87f8674228659",
         scope="HPO estimator/PPO adaptation; complete-return ES, not native LQR reproduction",

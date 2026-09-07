@@ -16,6 +16,10 @@ Rockafellar--Uryasev (RU). The actor minimizes the critic's expected RU loss;
 the threshold is updated using initial-state predictions only. Critic error can
 bias that training estimate; final risk always comes from the shared evaluator.
 No derivative passes through a market transition or the financial ledger.
+
+Native runs use 32 replay samples per inserted transition. Match this with
+gradient_steps * batch_size / (collection_batch_size * n_steps); the small
+default is an integration example, not a converged native training recipe.
 """
 
 from copy import deepcopy
@@ -32,6 +36,8 @@ from hedging_gym.gym_env import TensorHedgingEnv
 
 from .policies import DirectDHPolicy, _network
 from .training import _report, _sync
+from .checkpoints import (check_resume_options, due_checkpoint, load_checkpoint,
+                          restore_rng, rng_state, save_checkpoint)
 
 
 SOURCES = {
@@ -118,7 +124,9 @@ class DistributionalCritic(nn.Module):
     def expected_ru(self, observed, actions, threshold, alpha):
         values, scale, shape = self(observed, actions)
         values = values.sort(-1).values
-        positive_part = ((values-threshold).clamp_min(0)*self.body_weights).sum(-1)
+        threshold = torch.as_tensor(threshold, device=values.device, dtype=values.dtype)
+        threshold_values = threshold[:, None] if threshold.ndim else threshold
+        positive_part = ((values-threshold_values).clamp_min(0)*self.body_weights).sum(-1)
         if self.tail is not None:
             location = self.threshold_value(values)
             positive_part = positive_part + (1-self.tail_threshold) * gpd_expected_excess(
@@ -141,12 +149,27 @@ def _targets(actor, observed, config):
                  config.execution.holding_upper).target_holdings
 
 
+def _accumulated_cost(observed, actor, config, initial_cash):
+    """Initial premium minus current marked hedge wealth, in money units.
+
+    This known state potential permits native-style dense P&L labels without
+    changing terminal ES. It excludes the liability until final settlement.
+    """
+    fields = actor.observation_fields
+    positions = observed[:, [fields.index(f"{name}_position") for name in actor.instrument_names]]
+    mids = observed[:, [fields.index(f"{name}_mid") for name in actor.instrument_names]]
+    wealth = config.market.spot0*(observed[:, fields.index("cash")] + (positions*mids).sum(-1))
+    return initial_cash-wealth
+
+
 @torch.no_grad()
-def collect_episodes(actor, bank, *, noise=0., generator=None, n_step=5):
+def collect_episodes(actor, bank, *, noise=0., generator=None, n_step=5, dense_rewards=False):
     """Causal observations and executed actions; future paths only enter labels.
 
     The environment is completely detached. N-step costs are zero until the
     authoritative terminal loss; bootstrap is disabled at/after termination.
+    With dense_rewards, differences of marked hedge wealth telescope to the
+    same loss. The critic then predicts remaining rather than total loss.
     """
     config = bank.config
     env = TensorHedgingEnv(bank)
@@ -168,6 +191,11 @@ def collect_episodes(actor, bank, *, noise=0., generator=None, n_step=5):
     next_times = (times+n_step).clamp_max(config.n_steps)
     terminal = (next_times == config.n_steps)[None].expand(len(observed), -1)
     costs = torch.where(terminal, result["terminal_loss"][:, None], 0.)
+    if dense_rewards:
+        potentials = _accumulated_cost(observations.flatten(0, 1), actor, config,
+            bank.liability[0, 0]).reshape(len(observed), config.n_steps+1)
+        potentials[:, -1] = result["terminal_loss"]
+        costs = potentials[:, next_times]-potentials[:, :-1]
     transitions = (observations[:, :-1].flatten(0, 1), actions.flatten(0, 1),
                    costs.flatten(), observations[:, next_times].flatten(0, 1),
                    terminal.flatten())
@@ -201,19 +229,29 @@ def train_model_free(method, train_bank, *, seed=7, updates=100, batch_size=32,
                      learning_rate=1e-3, critic_learning_rate=1e-3,
                      zeta_learning_rate=3e-4, quantiles=128,
                      tail_threshold=.96, n_step=5, gradient_steps=4,
-                     replay_capacity=65536, exploration_noise=.1, target_rate=.01):
+                     replay_capacity=65536, exploration_noise=.1, target_rate=.01,
+                     collection_batch_size=None, dense_rewards=False,
+                     checkpoint_path=None, checkpoint_every=200, resume_from=None):
     """Return DirectDHPolicy-compatible actor and source/cost/training metadata.
 
     hull_rl is the Rotman quantile-D4PG family; exdrl adds the genuine GPD tail.
-    Updates each collect batch_size complete episodes, then gradient_steps
-    replay minibatches. Loss scaling is fixed from initial training episodes.
+    Updates each collect collection_batch_size complete episodes (batch_size
+    by default), then gradient_steps replay minibatches of batch_size samples.
+    This separates simulator work from the donor's replay-samples-per-insert
+    training intensity. Loss scaling is fixed from initial training episodes.
+    With dense_rewards=True, the critic learns remaining marked-PnL loss and
+    the actor's RU threshold subtracts accumulated loss. The objective is still
+    the same episode-global terminal ES, not a nested sequence of conditional ES.
     The ES threshold and its learning rate stay in portfolio-money units, as
     in Deep Hedging; only critic inputs/outputs use standardized loss units.
     Uniform replay and Polyak targets replace Acme/Reverb infrastructure.
     Continuous actors support bounded trades and fees, but not discrete lots or
     minimum-order constraints; no silent projection changes their problem.
+    Checkpoints contain the replay, all trainable/target state and both RNGs;
+    resume may increase total updates but does not change the training recipe.
     """
-    if method not in SOURCES or min(updates, batch_size, gradient_steps, replay_capacity, n_step) < 1:
+    collection_batch_size = batch_size if collection_batch_size is None else collection_batch_size
+    if method not in SOURCES or min(updates, batch_size, collection_batch_size, gradient_steps, replay_capacity, n_step, checkpoint_every) < 1:
         raise ValueError("choose hull_rl/exdrl and positive training work")
     if quantiles < 4 or not 0 < tail_threshold < 1 or (method == "exdrl" and quantiles*(1-tail_threshold) < 2):
         raise ValueError("EX-D4PG needs at least two quantiles above its GPD threshold")
@@ -239,14 +277,19 @@ def train_model_free(method, train_bank, *, seed=7, updates=100, batch_size=32,
         zeta_learning_rate=zeta_learning_rate, quantiles=quantiles,
         tail_threshold=tail_threshold if method == "exdrl" else None,
         n_step=n_step, gradient_steps=gradient_steps, replay_capacity=replay_capacity,
-        exploration_noise=exploration_noise, target_rate=target_rate)
+        exploration_noise=exploration_noise, target_rate=target_rate,
+        collection_batch_size=collection_batch_size, dense_rewards=dense_rewards)
     if progress:
         _report("train_start", method=method, seed=seed, device=str(device),
-                options=options, expected_episode_rollouts=updates*batch_size,
+                options=options, expected_episode_rollouts=updates*collection_batch_size,
                 initialization_paths=min(256, len(bank.spot)))
     initial_bank = bank_subset(bank, slice(0, min(256, len(bank.spot))))
-    initial_transitions, initial_losses, initial_observed = collect_episodes(actor, initial_bank,
-                                                                           n_step=n_step)
+    # Native D4PG explores during replay warmup too. Thousands of deterministic
+    # initial transitions otherwise dominate the first actor updates while the
+    # critic has almost no evidence of how alternative actions change returns.
+    initial_transitions, initial_losses, initial_observed = collect_episodes(
+        actor, initial_bank, n_step=n_step, noise=exploration_noise, generator=generator,
+        dense_rewards=dense_rewards)
     return_scale = initial_losses.std(unbiased=False).clamp_min(config.market.spot0*1e-6)
     scaled_losses = initial_losses/return_scale
     zeta = nn.Parameter(torch.quantile(initial_losses, config.risk.alpha))
@@ -267,13 +310,44 @@ def train_model_free(method, train_bank, *, seed=7, updates=100, batch_size=32,
     replay = _Replay(replay_capacity)
     initial_states, initial_actions, initial_costs, next_states, initial_done = initial_transitions
     replay.add((initial_states, initial_actions, initial_costs/return_scale, next_states, initial_done))
+    completed, history, previous_seconds = 0, [], 0.
+    if resume_from is not None:
+        saved = load_checkpoint(resume_from, method=method, config=config)
+        # Early qualification snapshots predate the optional dense-label mode.
+        saved["options"].setdefault("dense_rewards", False)
+        check_resume_options(saved, options)
+        if saved["seed"] != seed:
+            raise ValueError("resume requires the original training seed")
+        actor.load_state_dict(saved["actor"])
+        critic.load_state_dict(saved["critic"])
+        target_actor.load_state_dict(saved["target_actor"])
+        target_critic.load_state_dict(saved["target_critic"])
+        with torch.no_grad():
+            zeta.copy_(saved["zeta"].to(device))
+        return_scale = saved["return_scale"].to(device)
+        initial_observed = saved["initial_observed"].to(device)
+        actor_optimizer.load_state_dict(saved["actor_optimizer"])
+        critic_optimizer.load_state_dict(saved["critic_optimizer"])
+        threshold_optimizer.load_state_dict(saved["threshold_optimizer"])
+        if tail_optimizer is not None:
+            tail_optimizer.load_state_dict(saved["tail_optimizer"])
+        replay.arrays = [value.to(device) for value in saved["replay"]["arrays"]]
+        replay.size, replay.cursor = saved["replay"]["size"], saved["replay"]["cursor"]
+        generator.set_state(saved["generator_state"])
+        restore_rng(saved["rng_state"])
+        completed, history = saved["step"], saved["history"]
+        previous_seconds = saved["training_seconds"]
+        if completed > updates:
+            raise ValueError("total updates cannot precede the saved step")
+        if progress:
+            _report("train_resume", method=method, seed=seed, completed=completed, total=updates)
     _sync(device)
     initialization_seconds = time.perf_counter()-started
-    training_started, history = time.perf_counter(), []
-    for update in range(1, updates+1):
-        indices = torch.randint(len(bank.spot), (batch_size,), generator=generator, device=device)
+    training_started = time.perf_counter()
+    for update in range(completed+1, updates+1):
+        indices = torch.randint(len(bank.spot), (collection_batch_size,), generator=generator, device=device)
         transitions, episode_losses, _ = collect_episodes(actor, bank_subset(bank, indices),
-            noise=exploration_noise, generator=generator, n_step=n_step)
+            noise=exploration_noise, generator=generator, n_step=n_step, dense_rewards=dense_rewards)
         observed, actions, costs, next_observed, done = transitions
         replay.add((observed, actions, costs/return_scale, next_observed, done))
         for _ in range(gradient_steps):
@@ -296,8 +370,11 @@ def train_model_free(method, train_bank, *, seed=7, updates=100, batch_size=32,
             # Freeze critic weights, not its action derivative. Never backprop
             # through sampled transitions, the simulator, or cash accounting.
             critic.requires_grad_(False)
-            actor_loss = critic.expected_ru(observed, _targets(actor, observed, config),
-                                            zeta.detach()/return_scale, config.risk.alpha).mean()
+            accumulated = (_accumulated_cost(observed, actor, config, bank.liability[0, 0])
+                           if dense_rewards else observed.new_zeros(len(observed)))
+            actor_loss = (critic.expected_ru(observed, _targets(actor, observed, config),
+                (zeta.detach()-accumulated)/return_scale, config.risk.alpha)
+                + accumulated/return_scale).mean()
             actor_optimizer.zero_grad(set_to_none=True)
             actor_loss.backward()
             nn.utils.clip_grad_norm_(actor.parameters(), 5., error_if_nonfinite=True)
@@ -318,7 +395,7 @@ def train_model_free(method, train_bank, *, seed=7, updates=100, batch_size=32,
                     target.lerp_(current, target_rate)
         if update == 1 or update % 20 == 0 or update == updates:
             _sync(device)
-            elapsed = time.perf_counter()-training_started
+            elapsed = previous_seconds+time.perf_counter()-training_started
             record = dict(completed=update, total=updates, elapsed_seconds=elapsed,
                 eta_seconds=elapsed*(updates-update)/update, replay_transitions=replay.size,
                 critic_loss=float(critic_loss.detach()), actor_ru_estimate=float(actor_loss.detach()*return_scale),
@@ -328,19 +405,35 @@ def train_model_free(method, train_bank, *, seed=7, updates=100, batch_size=32,
             history.append(record)
             if progress:
                 _report("train_progress", method=method, seed=seed, **record)
+        if checkpoint_path is not None and due_checkpoint(update, updates, checkpoint_every):
+            save_checkpoint(checkpoint_path, dict(method=method, config=asdict(config),
+                options=options, seed=seed, step=update, actor=actor.state_dict(),
+                critic=critic.state_dict(), target_actor=target_actor.state_dict(),
+                target_critic=target_critic.state_dict(), actor_optimizer=actor_optimizer.state_dict(),
+                critic_optimizer=critic_optimizer.state_dict(),
+                tail_optimizer=None if tail_optimizer is None else tail_optimizer.state_dict(),
+                threshold_optimizer=threshold_optimizer.state_dict(), zeta=zeta.detach(),
+                return_scale=return_scale, initial_observed=initial_observed,
+                replay=dict(arrays=replay.arrays, size=replay.size, cursor=replay.cursor),
+                generator_state=generator.get_state(), rng_state=rng_state(), history=history,
+                training_seconds=previous_seconds+time.perf_counter()-training_started))
     _sync(device)
     metadata = dict(method=method, algorithm="EX-D4PG" if method == "exdrl" else "QR-D4PG",
         source=SOURCES[method], scope="common-environment adaptation, not author benchmark reproduction",
         objective="episode-global terminal ES via critic expected RU; initial-state threshold update",
+        reward_labels="telescoping dense marked-PnL" if dense_rewards else "sparse terminal loss",
         deviations=["PyTorch batched tensor environment instead of Acme/Reverb",
                     "Heston common book, all configured hedge instruments, authoritative terminal cash loss",
                     "global terminal ES replaces native conditional VaR/CVaR",
                     "uniform replay; Polyak targets; GPD inverse-CDF quadrature and analytic tail expectation"],
         seed=seed, device=str(device), options=options, config=asdict(config), history=history,
         zeta=float(zeta.detach()), threshold_units="portfolio_money", return_scale=float(return_scale),
-        expected_episode_rollouts=updates*batch_size, initialization_paths=len(initial_bank.spot),
-        transition_count=updates*batch_size*config.n_steps, gradient_updates=updates*gradient_steps,
-        initialization_seconds=initialization_seconds, training_seconds=time.perf_counter()-training_started,
+        expected_episode_rollouts=updates*collection_batch_size, initialization_paths=len(initial_bank.spot),
+        transition_count=updates*collection_batch_size*config.n_steps,
+        replay_samples_per_insert=gradient_steps*batch_size/(collection_batch_size*config.n_steps),
+        gradient_updates=updates*gradient_steps,
+        initialization_seconds=initialization_seconds,
+        training_seconds=previous_seconds+time.perf_counter()-training_started,
         total_seconds=time.perf_counter()-started,
         parameter_count=sum(parameter.numel() for parameter in actor.parameters()),
         critic_parameter_count=sum(parameter.numel() for parameter in critic.parameters()))

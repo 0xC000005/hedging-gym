@@ -116,3 +116,36 @@ def test_self_play_fits_policy_and_value_with_shared_terminal_risk():
     _, payoff = mark_state(child.spot, child.variance, changed.n_steps, changed)
     loss = liquidate(child.ledger, child.marks, payoff, changed)["terminal_loss"]
     assert child.terminal_cost == pytest.approx(float(changed.risk.loss(loss, policy.zeta)[0]))
+
+
+def test_checkpoint_resume_preserves_search_replay_and_training(tmp_path):
+    config = benchmark_config(model="gbm", time_grid=TimeGrid(n_steps=3))
+    bank = generate_market_bank(config, 16, 103, dtype=torch.float64)
+    options = dict(batch_size=4, hidden=(8,), simulations=8, gradient_steps=2, progress=False)
+    complete, complete_metadata = train_alphazero(bank, updates=3, **options)
+    checkpoint = tmp_path / "alphazero.pt"
+    train_alphazero(bank, updates=1, checkpoint_path=checkpoint, **options)
+    resumed, resumed_metadata = train_alphazero(bank, updates=3, resume_from=checkpoint,
+                                               checkpoint_path=checkpoint, **options)
+    for expected, actual in zip(complete.parameters(), resumed.parameters()):
+        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+    torch.testing.assert_close(resumed.zeta, complete.zeta, rtol=0, atol=0)
+    assert resumed_metadata["work"] == complete_metadata["work"]
+    assert resumed_metadata["history"][-1]["value_loss"] == complete_metadata["history"][-1]["value_loss"]
+    saved = torch.load(checkpoint, weights_only=False)
+    assert saved["step"] == 3 and len(saved["replay"]) == 3
+    assert checkpoint.with_name("alphazero-early.pt").exists()
+
+
+def test_repeating_an_absolute_grid_action_remains_a_hold():
+    config = benchmark_config(time_grid=TimeGrid(n_steps=3))
+    policy = AlphaZeroPolicy(config, hidden=(8,))
+    # Source actions represent absolute holdings, so repeating one must not
+    # force a switch to the second-best action just to canonicalize HOLD.
+    target = policy.targets[0].float()[None]
+    candidates, legal = policy.candidates(target, config)
+    assert legal[0, 0] and not legal[0, -1]
+    torch.testing.assert_close(candidates[0, 0], target[0])
+    off_grid = torch.full_like(target, .123)
+    _, off_grid_legal = policy.candidates(off_grid, config)
+    assert off_grid_legal[0, -1]

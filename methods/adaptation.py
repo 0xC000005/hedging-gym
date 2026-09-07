@@ -20,6 +20,8 @@ import torch
 from torch import nn
 
 from hedging_gym.finance import bank_subset, bank_to
+from .checkpoints import (check_resume_options, due_checkpoint, load_checkpoint,
+                          restore_rng, rng_state, save_checkpoint)
 from .policies import BUY, HOLD, SELL, PolicyAction, _ConfiguredPolicy, _bounds, _network
 from .training import _report, _sync, rollout, train_policy
 
@@ -85,7 +87,8 @@ def train_online_finetune(train_bank, **kwargs):
 
 def train_multitask(train_banks, *, seed=7, updates=8, batch_size=32,
                     hidden=(32, 32), embedding_dim=4, learning_rate=1e-3,
-                    zeta_learning_rate=3e-4, device="cpu", progress=True):
+                    zeta_learning_rate=3e-4, device="cpu", progress=True,
+                    checkpoint_path=None, checkpoint_every=100, resume_from=None):
     """Jointly fit source tasks, then return an embedding-adaptable policy.
 
     ``updates`` is the total number of optimizer steps, not steps per market.
@@ -96,7 +99,7 @@ def train_multitask(train_banks, *, seed=7, updates=8, batch_size=32,
     banks = tuple(train_banks)
     if len(banks) < 2 or updates < len(banks) or batch_size < 1:
         raise ValueError("multitask pretraining needs at least two banks and one update per task")
-    if learning_rate <= 0 or zeta_learning_rate <= 0:
+    if learning_rate <= 0 or zeta_learning_rate <= 0 or checkpoint_every < 1:
         raise ValueError("learning rates must be positive")
     config = banks[0].config
     _continuous_contract(config)
@@ -124,17 +127,34 @@ def train_multitask(train_banks, *, seed=7, updates=8, batch_size=32,
                 workers=torch.get_num_threads(), source_markets=[asdict(b.config.market) for b in banks],
                 options=options, expected_episode_rollouts=updates*batch_size,
                 initialization_paths=sum(min(1024, len(b.spot)) for b in banks))
-    with torch.no_grad():
-        for task, bank in enumerate(banks):
-            policy.active_task = task
-            losses = rollout(policy, bank_subset(bank, slice(0, min(1024, len(bank.spot)))))
-            zeta[task] = torch.quantile(losses["terminal_loss"], config.risk.alpha)
+    index_generator = torch.Generator().manual_seed(seed+100003)
+    history, completed, prior_seconds = [], 0, 0.
+    source_configs = [asdict(bank.config) for bank in banks]
+    if resume_from is not None:
+        saved = load_checkpoint(resume_from, method="adaptive_dh", config=config)
+        check_resume_options(saved, options)
+        if (saved["seed"] != seed or saved["source_configs"] != source_configs
+                or saved["source_paths"] != [len(bank.spot) for bank in banks]):
+            raise ValueError("resume requires the saved seed, source markets and bank sizes")
+        policy.load_state_dict(saved["policy"])
+        zeta.data.copy_(saved["zeta"].to(device))
+        optimizer.load_state_dict(saved["optimizer"])
+        index_generator.set_state(saved["index_rng"])
+        restore_rng(saved["rng"])
+        completed, history = saved["step"], saved["history"]
+        prior_seconds = saved["training_seconds"]
+        if completed > updates:
+            raise ValueError("total updates cannot precede the checkpoint")
+    else:
+        with torch.no_grad():
+            for task, bank in enumerate(banks):
+                policy.active_task = task
+                losses = rollout(policy, bank_subset(bank, slice(0, min(1024, len(bank.spot)))))
+                zeta[task] = torch.quantile(losses["terminal_loss"], config.risk.alpha)
     _sync(device)
     initialization_seconds = time.perf_counter()-started
     training_start = time.perf_counter()
-    index_generator = torch.Generator().manual_seed(seed+100003)
-    history = []
-    for step in range(1, updates+1):
+    for step in range(completed+1, updates+1):
         task = (step-1) % len(banks)
         policy.active_task = task
         bank = banks[task]
@@ -146,15 +166,22 @@ def train_multitask(train_banks, *, seed=7, updates=8, batch_size=32,
         torch.nn.utils.clip_grad_norm_([*policy.shared.parameters(), policy.source_embeddings, zeta],
                                        5., error_if_nonfinite=True)
         optimizer.step()
-        if step == 1 or step % 20 == 0 or step == updates:
+        if step <= len(banks) or (step-1) % (20*len(banks)) < len(banks) or step == updates:
             _sync(device)
-            elapsed = time.perf_counter()-training_start
+            elapsed = prior_seconds+time.perf_counter()-training_start
             record = dict(completed=step, total=updates, task=task,
                           batch_risk_loss=float(objective.detach()), elapsed_seconds=elapsed,
-                          eta_seconds=elapsed*(updates-step)/step)
+                          eta_seconds=elapsed*(updates-step)/step, zeta=float(zeta[task].detach()))
             history.append(record)
             if progress:
                 _report("train_progress", method="adaptive_dh", **record)
+        if checkpoint_path is not None and due_checkpoint(step, updates, checkpoint_every):
+            save_checkpoint(checkpoint_path, dict(method="adaptive_dh", phase="pretraining",
+                step=step, seed=seed, config=asdict(config), source_configs=source_configs,
+                source_paths=[len(bank.spot) for bank in banks], options=options,
+                policy=policy.state_dict(), zeta=zeta.detach(), optimizer=optimizer.state_dict(),
+                index_rng=index_generator.get_state(), rng=rng_state(), history=history,
+                training_seconds=prior_seconds+time.perf_counter()-training_start))
     policy.prepare_adaptation()
     _sync(device)
     # This mean initializes the optimizer's auxiliary threshold; it is not a
@@ -171,7 +198,8 @@ def train_multitask(train_banks, *, seed=7, updates=8, batch_size=32,
         updates_per_source=[updates//len(banks)+(i < updates % len(banks)) for i in range(len(banks))],
         source_zetas=zeta.detach().cpu().tolist(), zeta=float(zeta.detach().mean()),
         history=history, initialization_seconds=initialization_seconds,
-        training_seconds=time.perf_counter()-training_start, total_seconds=time.perf_counter()-started,
+        training_seconds=prior_seconds+time.perf_counter()-training_start,
+        total_seconds=prior_seconds+time.perf_counter()-started,
         expected_episode_rollouts=updates*batch_size,
         observation_fields=list(policy.observation_fields), instrument_names=list(policy.instrument_names),
         parameter_count=sum(p.numel() for p in policy.parameters()),
@@ -190,22 +218,26 @@ class AdaptationUpdater:
     Adam, matching source new-task calibration; repeated calls in that market
     keep the optimizer. No cache silently restores a known evaluation regime.
 
-    A call fits ``updates`` minibatches. Inspect ``history`` for complete work,
-    and save ``optimizer.state_dict()`` alongside policy weights if resuming.
+    A call fits ``updates`` minibatches. Checkpoints include the in-flight call,
+    so resuming it neither repeats an update nor silently resets a task vector.
     """
 
     def __init__(self, policy, *, metadata=None, mode=None, seed=7, updates=1,
                  batch_size=32, learning_rate=1e-3, zeta_learning_rate=3e-4,
-                 progress=True):
+                 progress=True, checkpoint_path=None, checkpoint_every=100):
         inferred = "embedding" if isinstance(policy, TaskEmbeddedPolicy) else "finetune"
         self.mode = inferred if mode is None else mode
         if self.mode not in ("finetune", "embedding") or (self.mode == "embedding" and inferred != self.mode):
             raise ValueError("embedding updates require a TaskEmbeddedPolicy")
-        if updates < 1 or batch_size < 1 or learning_rate <= 0 or zeta_learning_rate <= 0:
+        if (updates < 1 or batch_size < 1 or learning_rate <= 0 or zeta_learning_rate <= 0
+                or checkpoint_every < 1):
             raise ValueError("positive update count, batch size and learning rates required")
         self.policy, self.updates, self.batch_size = policy, updates, batch_size
         self.learning_rate, self.zeta_learning_rate = learning_rate, zeta_learning_rate
         self.progress, self.history = progress, []
+        self.seed = seed
+        self.checkpoint_path, self.checkpoint_every = checkpoint_path, checkpoint_every
+        self.completed_steps, self.pending_call = 0, None
         self.index_generator = torch.Generator().manual_seed(seed+100003)
         parameter = next(policy.parameters())
         self.zeta = nn.Parameter(parameter.new_tensor(0. if metadata is None else metadata["zeta"]))
@@ -215,6 +247,34 @@ class AdaptationUpdater:
         else:
             policy.requires_grad_(True)
         self._new_optimizer()
+
+    def state_dict(self):
+        """Complete adaptation state, including frozen-parameter semantics."""
+        return dict(mode=self.mode, policy=self.policy.state_dict(),
+            requires_grad={name: parameter.requires_grad for name, parameter in self.policy.named_parameters()},
+            active_task=getattr(self.policy, "active_task", None), zeta=self.zeta.detach(),
+            optimizer=self.optimizer.state_dict(), index_rng=self.index_generator.get_state(),
+            rng=rng_state(), last_market=self.last_market, history=self.history,
+            pending_call=self.pending_call, completed_steps=self.completed_steps,
+            options=dict(updates=self.updates, batch_size=self.batch_size,
+                         learning_rate=self.learning_rate, zeta_learning_rate=self.zeta_learning_rate,
+                         seed=self.seed))
+
+    def load_state_dict(self, saved):
+        if saved["mode"] != self.mode or saved["options"] != self.state_dict()["options"]:
+            raise ValueError("adaptation resume requires the saved mode and update recipe")
+        self.policy.load_state_dict(saved["policy"])
+        for name, parameter in self.policy.named_parameters():
+            parameter.requires_grad_(saved["requires_grad"][name])
+        if isinstance(self.policy, TaskEmbeddedPolicy):
+            self.policy.active_task = saved["active_task"]
+        self.zeta.data.copy_(saved["zeta"].to(self.zeta.device))
+        self._new_optimizer()
+        self.optimizer.load_state_dict(saved["optimizer"])
+        self.index_generator.set_state(saved["index_rng"])
+        self.last_market, self.history = saved["last_market"], saved["history"]
+        self.pending_call, self.completed_steps = saved["pending_call"], saved["completed_steps"]
+        restore_rng(saved["rng"])
 
     def _new_optimizer(self):
         self.trainable = ([self.policy.embedding] if self.mode == "embedding"
@@ -231,7 +291,10 @@ class AdaptationUpdater:
         device = self.zeta.device
         started = time.perf_counter()
         bank = bank_to(training_bank, device)
-        reset = self.mode == "embedding" and self.last_market != config.market
+        continuing = self.pending_call is not None
+        if continuing and self.last_market != config.market:
+            raise ValueError("finish the saved current-market update before changing market")
+        reset = not continuing and self.mode == "embedding" and self.last_market != config.market
         initialization_paths = 0
         if reset:
             self.policy.reset_embedding()
@@ -241,11 +304,16 @@ class AdaptationUpdater:
                 losses = rollout(self.policy, bank_subset(bank, slice(0, initialization_paths)))
                 self.zeta.copy_(torch.quantile(losses["terminal_loss"], config.risk.alpha))
         self.last_market = config.market
+        if not continuing:
+            self.pending_call = dict(completed=0, reset_embedding=reset,
+                initialization_paths=initialization_paths, elapsed_seconds=0.)
+        pending = self.pending_call
+        prior_seconds = pending["elapsed_seconds"]
         if self.progress:
             _report("adapt_start", method=self.mode, call=len(self.history)+1,
                     market=asdict(config.market), updates=self.updates, batch_size=self.batch_size,
                     device=str(device), reset_embedding=reset, initialization_paths=initialization_paths)
-        for step in range(1, self.updates+1):
+        for step in range(pending["completed"]+1, self.updates+1):
             indices = torch.randint(len(bank.spot), (self.batch_size,), generator=self.index_generator)
             sample = bank_subset(bank, indices.to(device))
             self.policy.train()
@@ -255,16 +323,26 @@ class AdaptationUpdater:
             objective.backward()
             torch.nn.utils.clip_grad_norm_([*self.trainable, self.zeta], 5., error_if_nonfinite=True)
             self.optimizer.step()
+            self.completed_steps += 1
+            pending["completed"] = step
+            pending["elapsed_seconds"] = prior_seconds+time.perf_counter()-started
             if self.progress and (step == 1 or step % 20 == 0 or step == self.updates):
                 _sync(device)
                 elapsed = time.perf_counter()-started
                 _report("adapt_progress", method=self.mode, completed=step, total=self.updates,
                         elapsed_seconds=elapsed, eta_seconds=elapsed*(self.updates-step)/step,
                         batch_risk_loss=float(objective.detach()))
+            if step == self.updates:
+                record = dict(call=len(self.history)+1, mode=self.mode, market=asdict(config.market),
+                    updates=self.updates, expected_episode_rollouts=self.updates*self.batch_size,
+                    initialization_paths=pending["initialization_paths"],
+                    reset_embedding=pending["reset_embedding"], zeta=float(self.zeta.detach()),
+                    elapsed_seconds=pending["elapsed_seconds"])
+                self.history.append(record)
+                self.pending_call = None
+            if self.checkpoint_path is not None and due_checkpoint(step, self.updates, self.checkpoint_every):
+                save_checkpoint(self.checkpoint_path, dict(method=self.mode+"_adaptation",
+                    config=asdict(config), step=step,
+                    total_completed_steps=self.completed_steps, state=self.state_dict()))
         _sync(device)
-        record = dict(call=len(self.history)+1, mode=self.mode, market=asdict(config.market),
-                      updates=self.updates, expected_episode_rollouts=self.updates*self.batch_size,
-                      initialization_paths=initialization_paths, reset_embedding=reset,
-                      zeta=float(self.zeta.detach()), elapsed_seconds=time.perf_counter()-started)
-        self.history.append(record)
-        return record
+        return self.history[-1]

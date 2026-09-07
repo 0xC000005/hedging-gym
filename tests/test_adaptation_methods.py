@@ -89,3 +89,42 @@ def test_both_update_callbacks_run_chronological_a_b_a_on_common_heston():
             assert np.isfinite(stage["metrics"]["expected_shortfall"])
             assert stage["metrics"]["constraint_violations"] == 0
             assert tapes[stage["stage"]]["positions"].shape == (8, 3, config.n_assets)
+
+
+def test_multitask_and_mid_call_adaptation_resume_exactly(tmp_path):
+    """A saved update resumes, not restarts, including frozen task structure."""
+    banks = _banks()
+    options = dict(batch_size=16, hidden=(8,), embedding_dim=2, seed=43, progress=False)
+    full, full_metadata = train_multitask(banks, updates=6, **options)
+    path = tmp_path / "pretrain.pt"
+    train_multitask(banks, updates=3, checkpoint_path=path, **options)
+    resumed, metadata = train_multitask(banks, updates=6, resume_from=path, **options)
+    for first, second in zip(full.parameters(), resumed.parameters()):
+        torch.testing.assert_close(first, second, rtol=0., atol=0.)
+        assert first.requires_grad == second.requires_grad
+    assert metadata["source_zetas"] == full_metadata["source_zetas"]
+    assert path.with_name("pretrain-early.pt").exists()
+
+    adaptation_path = tmp_path / "adapt.pt"
+    updater = AdaptationUpdater(full, metadata=full_metadata, updates=3, batch_size=16,
+        seed=47, progress=False, checkpoint_path=adaptation_path)
+    updater(banks[1])
+    early = torch.load(tmp_path / "adapt-early.pt", weights_only=False)
+    other = AdaptationUpdater(resumed, metadata=metadata, updates=3, batch_size=16,
+                              seed=47, progress=False)
+    other.load_state_dict(early["state"])
+    assert other.pending_call["completed"] == 1
+    other(banks[1])
+    for first, second in zip(full.parameters(), resumed.parameters()):
+        torch.testing.assert_close(first, second, rtol=0., atol=0.)
+        assert first.requires_grad == second.requires_grad
+    torch.testing.assert_close(updater.zeta, other.zeta, rtol=0., atol=0.)
+    assert other.completed_steps == 3
+    assert len(other.history) == 1 and other.pending_call is None
+    assert all(float(state["step"]) == 3 for state in other.optimizer.state.values())
+
+    # Returning A is a fresh embedding calibration, not restoration of A's old vector.
+    updater(banks[0])
+    other(banks[0])
+    for first, second in zip(full.parameters(), resumed.parameters()):
+        torch.testing.assert_close(first, second, rtol=0., atol=0.)
