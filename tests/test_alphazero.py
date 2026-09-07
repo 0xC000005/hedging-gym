@@ -8,11 +8,12 @@ import torch
 from hedging_gym.benchmark import benchmark_config
 from hedging_gym.config import EuropeanOption, TimeGrid
 from hedging_gym.evaluation import evaluate_controller
-from hedging_gym.finance import generate_market_bank, liquidate, mark_state, numpy_ledger
+from hedging_gym.finance import (generate_market_bank, liquidate, mark_state,
+    numpy_ledger, observation, trade_step)
 from hedging_gym.gym_env import TensorHedgingEnv
 from methods.alphazero import (
-    AlphaZeroPolicy, _FinanceSearch, alphazero_controller,
-    stochastic_search_batch, train_alphazero,
+    AlphaZeroPolicy, _FinanceSearch, _completed_rollouts, alphazero_controller,
+    completed_rollout_action_diagnostic, stochastic_search_batch, train_alphazero,
 )
 
 
@@ -90,7 +91,8 @@ def test_self_play_fits_policy_and_value_with_shared_terminal_risk():
     torch.manual_seed(7)
     initial = AlphaZeroPolicy(config, hidden=(8,)).double()
     policy, metadata = train_alphazero(bank, updates=2, batch_size=4, hidden=(8,),
-                                     simulations=8, gradient_steps=2, progress=False)
+        simulations=8, gradient_steps=2, calibration_paths=16, reanalysis_states=8,
+        reanalysis_samples=8, value_gradient_steps=8, progress=False)
     assert any(not torch.equal(a, b) for a, b in zip(initial.parameters(), policy.parameters()))
     assert metadata["optimizer_steps"] == 4
     assert metadata["work"]["terminal_evaluations"] > 0
@@ -116,12 +118,14 @@ def test_self_play_fits_policy_and_value_with_shared_terminal_risk():
     _, payoff = mark_state(child.spot, child.variance, changed.n_steps, changed)
     loss = liquidate(child.ledger, child.marks, payoff, changed)["terminal_loss"]
     assert child.terminal_cost == pytest.approx(float(changed.risk.loss(loss, policy.zeta)[0]))
+    assert child.terminal_loss == pytest.approx(float(loss[0]))
 
 
 def test_checkpoint_resume_preserves_search_replay_and_training(tmp_path):
     config = benchmark_config(model="gbm", time_grid=TimeGrid(n_steps=3))
     bank = generate_market_bank(config, 16, 103, dtype=torch.float64)
-    options = dict(batch_size=4, hidden=(8,), simulations=8, gradient_steps=2, progress=False)
+    options = dict(batch_size=4, hidden=(8,), simulations=8, gradient_steps=2, progress=False,
+        calibration_paths=16, reanalysis_states=8, reanalysis_samples=4, value_gradient_steps=8)
     complete, complete_metadata = train_alphazero(bank, updates=3, **options)
     checkpoint = tmp_path / "alphazero.pt"
     train_alphazero(bank, updates=1, checkpoint_path=checkpoint, **options)
@@ -135,6 +139,66 @@ def test_checkpoint_resume_preserves_search_replay_and_training(tmp_path):
     saved = torch.load(checkpoint, weights_only=False)
     assert saved["step"] == 3 and len(saved["replay"]) == 3
     assert checkpoint.with_name("alphazero-early.pt").exists()
+    torch.testing.assert_close(resumed.value_scale, complete.value_scale, rtol=0, atol=0)
+    assert resumed_metadata["refit_work"] == complete_metadata["refit_work"]
+    assert saved["value_replay"][1].shape == (8, 4)
+
+
+def test_checkpoint_threshold_matches_frozen_actor_and_raw_returns_are_relabelable(tmp_path):
+    config = benchmark_config(model="gbm", time_grid=TimeGrid(n_steps=3))
+    bank = generate_market_bank(config, 64, 991, dtype=torch.float64)
+    checkpoint = tmp_path / "calibrated.pt"
+    policy, _ = train_alphazero(bank, updates=1, batch_size=8, hidden=(8,),
+        simulations=8, gradient_steps=2, calibration_paths=64, reanalysis_states=8,
+        reanalysis_samples=8, value_gradient_steps=8, checkpoint_path=checkpoint, progress=False)
+    _, tape = evaluate_controller(alphazero_controller(policy, simulations=0), bank)
+    torch.testing.assert_close(policy.zeta, torch.quantile(tape["terminal_loss"], config.risk.alpha))
+    env = TensorHedgingEnv(bank)
+    observed = env.reset()
+    logits, _ = policy(policy.features(observed, spot0=config.market.spot0))
+    saved = torch.load(checkpoint, weights_only=False)
+    raw = saved["value_replay"][1]
+    assert (raw < policy.zeta).any()  # Below-threshold returns remain uncensored.
+    low_zeta = raw.min() - .01
+    assert (config.risk.loss(raw, low_zeta) > low_zeta).all()
+    policy.zeta.add_(.5)
+    after, _ = policy(policy.features(observed, spot0=config.market.spot0))
+    torch.testing.assert_close(logits, after, rtol=0, atol=0)
+
+
+def test_completed_action_diagnostic_uses_exact_terminal_cost_at_one_step():
+    config = benchmark_config(model="gbm", time_grid=TimeGrid(n_steps=1))
+    policy = AlphaZeroPolicy(config, hidden=(8,)).double()
+    result, tape = completed_rollout_action_diagnostic(policy, config, samples=8, seed=99)
+    expected = config.risk.loss(tape["terminal_loss"], policy.zeta).mean(-1)
+    torch.testing.assert_close(torch.tensor(result["completed_ru"]), expected, check_dtype=False)
+    assert result["mean_absolute_value_error"] < 1e-12
+    assert not result["action_ordering_screen_failed"]
+    assert result["work"]["terminal_evaluations"] == len(result["action_indices"])*8
+
+
+def test_reanalysis_restores_paid_costs_through_cash_and_completes_same_policy():
+    config = benchmark_config(model="gbm", time_grid=TimeGrid(n_steps=3))
+    bank = generate_market_bank(config, 4, 1201, dtype=torch.float64)
+    policy = AlphaZeroPolicy(config, hidden=(8,)).double()
+    env = TensorHedgingEnv(bank)
+    before = policy.value_features(policy.features(env.reset(), spot0=config.market.spot0))[:, -1]
+    traded = trade_step(env.state, policy.targets[0].expand(4, -1), bank.marks[:, 0], config)
+    after = policy.value_features(policy.features(observation(bank, 0, traded),
+                                                  spot0=config.market.spot0))[:, -1]
+    torch.testing.assert_close((before-after)*policy.search_scale, traded.total_cost,
+                               atol=1e-14, rtol=1e-12)
+    observed, *_ = env.step(policy.targets[0].expand(4, -1))
+    assert (env.state.total_cost > 0).all()
+    model = _FinanceSearch(policy, config)
+    original = model.roots(observed, env.state, 1)
+    restored = model.observed_roots(observed)
+    first, _, work = _completed_rollouts(model, original, [17, 19, 23, 29])
+    second, _, restored_work = _completed_rollouts(model, restored, [17, 19, 23, 29])
+    np.testing.assert_array_equal(first, second)
+    assert restored_work == work
+    assert work["terminal_evaluations"] == 4
+    assert work["transition_samples"] == 8
 
 
 def test_repeating_an_absolute_grid_action_remains_a_hold():

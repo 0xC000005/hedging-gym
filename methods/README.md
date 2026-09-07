@@ -13,6 +13,7 @@ outside it.
 | `training.py` | Causal rollouts and a shared terminal expected-shortfall objective |
 | `checkpoints.py` | Trusted-local snapshot files and RNG state; each learner owns its training state |
 | `model_free.py` | Quantile D4PG and EX-D4PG with a generalized-Pareto tail |
+| `sb3.py` | Stock SB3 algorithms through a thin batched VecEnv/action-coordinate adapter |
 | `adaptation.py` | Full-network fine-tuning and task-embedding adaptation |
 | `alphazero.py` | Stochastic PUCT, learned policy/value and search-improvement training |
 | `hybrid.py` | Discrete HOLD/TRADE choices with pathwise sizing and categorical PPO |
@@ -115,9 +116,13 @@ keeps their objective aligned with the other methods rather than silently
 changing to a different conditional-tail objective at each date.
 
 For substantive RL training, use `experiments/qualify_model_free.py`, not the
-eight-update integration recipe. Its source-aligned settings include exploratory
-replay warmup, Adam at `1e-4`, and 32 replay samples per newly collected
-transition. `dense_rewards=True` trains on changes in marked hedge wealth;
+eight-update integration recipe. It uses exploratory replay warmup and 32 replay
+samples per newly collected transition. Actor, quantile critic and Pareto tail
+have separate learning rates. Quantile-Huber smoothing is explicit in normalized
+loss units; the repaired recipe adds action-derivative clipping and delayed actor
+updates. These are disclosed common-task training choices, not a claim to match
+every author setting. `hull_rl` refers to Cao/Hull's **2023 QR-D4PG** work, not
+their original 2021 DDPG implementation. `dense_rewards=True` trains on changes in marked hedge wealth;
 these telescope to the same terminal loss. Shifting the global risk threshold
 by accumulated loss preserves the terminal ES objective. The intermediate
 labels are detached: the actor still learns through its critic, not through
@@ -138,6 +143,17 @@ allowing sufficient search/training are necessary before a competitive claim.
 Market outcomes are averaged, never treated as actions to optimize. Inference
 and conditional pricing are batched; traversal is on CPU. `simulations=0` in
 `alphazero_controller` evaluates its learned policy without search.
+
+The repaired adapter fits actor and value networks separately. Training-only
+greedy rollouts calibrate the global ES threshold; fresh completed continuations
+then refit value targets at that threshold before a checkpoint is saved. The
+critic also receives marked hedge wealth computed from already observed cash,
+holdings and marks. Counterfactual successor states broaden its action coverage.
+These changes address stale targets and representation, not a proven performance
+advantage. The value estimates describe the frozen greedy continuation; their
+accuracy does not automatically carry over to a changed search controller.
+Legacy checkpoints require their original implementation, not silent loading
+into the revised architecture.
 
 CEM improves the **current** action and uses a frozen feedback policy afterward.
 It is not a full open-loop MPPI controller. `cem` and the HPO variants disclose
@@ -160,6 +176,25 @@ updates, or an AlphaZero self-play batch plus training. Equal update counts do
 The runner's `--output-dir` saves initial policy weights, configuration, held-out
 market bank and trade tapes. Adaptation results and final adapted policies are
 separate files. Final ES is measured from actual held-out losses, not critics.
+
+### Independent SB3 control
+
+SB3 is optional: `uv sync --locked --group baselines`. The financial environment
+does not depend on it. `SB3HedgingVecEnv` samples batches from a supplied training
+bank and converts SB3's normalized actions into the same legal holding bounds.
+It adds SB3's terminal-observation/autoreset convention, not another simulator.
+
+```bash
+uv run --frozen --group baselines python -m experiments.qualify_sb3 --run-dir /path/to/banks --output-dir /path/to/sb3-run
+```
+
+PPO uses complete-horizon rollouts with 512 episodes per update. At ES95 that is
+about 26 expected tail outcomes, versus fewer than one for eight episodes. It
+optimizes sampled-policy terminal risk; sampled and greedy deployment are
+reported separately. Threshold calibration uses training paths only. Checkpoints
+are standard SB3 ZIP files; reload checks verify identical greedy actions/losses,
+not exact continuation of the custom environment's RNG state. SB3 does not
+provide AlphaZero and is not a substitute for the distributional source methods.
 
 ### Checkpoint and resume training
 

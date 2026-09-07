@@ -46,12 +46,32 @@ SOURCES = {
 }
 
 
-def quantile_huber_loss(predictions, targets, probabilities):
-    """QR-D4PG's pairwise quantile regression, on upper-tail terminal losses."""
+def quantile_huber_loss(predictions, targets, probabilities, kappa=1.):
+    """Quantile loss with explicit smoothing in standardized return units.
+
+    kappa=0 is pinball loss. A fixed nonzero Huber threshold changes the
+    population quantile optimum; return normalization must not hide its units.
+    """
     error = targets[:, None, :] - predictions[:, :, None]
-    huber = F.huber_loss(error, torch.zeros_like(error), reduction="none")
+    if kappa < 0:
+        raise ValueError("quantile Huber kappa must be nonnegative")
+    huber = (error.abs() if kappa == 0 else
+             F.huber_loss(error, torch.zeros_like(error), delta=kappa, reduction="none") / kappa)
     weights = (probabilities[None, :, None] - (error.detach() < 0).to(error.dtype)).abs()
     return (weights * huber).mean()
+
+
+def action_gradient_loss(values, actions, clip=None):
+    """Deterministic policy-gradient surrogate with per-state dQ/da clipping.
+
+    Clip before the minibatch mean, as in the donor DPG learner. This bounds
+    the critic's action derivative, separately from actor parameter gradients.
+    """
+    derivative, = torch.autograd.grad(values.sum(), actions, retain_graph=True)
+    derivative = derivative.detach()
+    if clip is not None:
+        derivative = derivative * (clip / derivative.norm(dim=-1, keepdim=True).clamp_min(clip))
+    return (actions * derivative).sum(-1).mean()
 
 
 def gpd_expected_excess(cutoff, scale, shape):
@@ -163,7 +183,8 @@ def _accumulated_cost(observed, actor, config, initial_cash):
 
 
 @torch.no_grad()
-def collect_episodes(actor, bank, *, noise=0., generator=None, n_step=5, dense_rewards=False):
+def collect_episodes(actor, bank, *, noise=0., generator=None, n_step=5, dense_rewards=False,
+                     first_action=None):
     """Causal observations and executed actions; future paths only enter labels.
 
     The environment is completely detached. N-step costs are zero until the
@@ -177,8 +198,9 @@ def collect_episodes(actor, bank, *, noise=0., generator=None, n_step=5, dense_r
     observations, actions = [observed], []
     lower = observed.new_tensor(config.execution.vector("holding_lower", config.n_assets))
     upper = observed.new_tensor(config.execution.vector("holding_upper", config.n_assets))
-    for _ in range(config.n_steps):
-        target = _targets(actor, observed, config)
+    for time_index in range(config.n_steps):
+        target = (first_action.expand(len(observed), -1) if time_index == 0 and first_action is not None
+                  else _targets(actor, observed, config))
         if noise:
             target = (target + noise*(upper-lower)*torch.randn(
                 target.shape, generator=generator, device=target.device, dtype=target.dtype)).clamp(lower, upper)
@@ -231,6 +253,9 @@ def train_model_free(method, train_bank, *, seed=7, updates=100, batch_size=32,
                      tail_threshold=.96, n_step=5, gradient_steps=4,
                      replay_capacity=65536, exploration_noise=.1, target_rate=.01,
                      collection_batch_size=None, dense_rewards=False,
+                     quantile_kappa=1., tail_learning_rate=None, tail_policy_actions=False,
+                     actor_warmup_updates=0, actor_update_period=1, action_gradient_clip=None,
+                     extend_frozen_warmup=False,
                      checkpoint_path=None, checkpoint_every=200, resume_from=None):
     """Return DirectDHPolicy-compatible actor and source/cost/training metadata.
 
@@ -249,14 +274,22 @@ def train_model_free(method, train_bank, *, seed=7, updates=100, batch_size=32,
     minimum-order constraints; no silent projection changes their problem.
     Checkpoints contain the replay, all trainable/target state and both RNGs;
     resume may increase total updates but does not change the training recipe.
+    Explicitly extending a still-frozen actor warmup is also supported: neither
+    the actor nor the global threshold may have taken an optimizer step yet.
+    Smaller quantile smoothing and delayed actor updates are disclosed
+    stabilization adaptations, not claimed to reproduce the donor recipe.
     """
     collection_batch_size = batch_size if collection_batch_size is None else collection_batch_size
+    tail_learning_rate = critic_learning_rate if tail_learning_rate is None else tail_learning_rate
     if method not in SOURCES or min(updates, batch_size, collection_batch_size, gradient_steps, replay_capacity, n_step, checkpoint_every) < 1:
         raise ValueError("choose hull_rl/exdrl and positive training work")
     if quantiles < 4 or not 0 < tail_threshold < 1 or (method == "exdrl" and quantiles*(1-tail_threshold) < 2):
         raise ValueError("EX-D4PG needs at least two quantiles above its GPD threshold")
     if min(learning_rate, critic_learning_rate, zeta_learning_rate) <= 0 or not 0 < target_rate <= 1:
         raise ValueError("learning rates must be positive and target_rate in (0,1]")
+    if (quantile_kappa < 0 or tail_learning_rate <= 0 or actor_warmup_updates < 0
+            or actor_update_period < 1 or (action_gradient_clip is not None and action_gradient_clip <= 0)):
+        raise ValueError("invalid quantile smoothing, tail rate, actor schedule or action derivative clip")
     if exploration_noise < 0 or len(train_bank.spot) < 1:
         raise ValueError("exploration noise must be nonnegative and the bank nonempty")
     config = train_bank.config
@@ -278,7 +311,10 @@ def train_model_free(method, train_bank, *, seed=7, updates=100, batch_size=32,
         tail_threshold=tail_threshold if method == "exdrl" else None,
         n_step=n_step, gradient_steps=gradient_steps, replay_capacity=replay_capacity,
         exploration_noise=exploration_noise, target_rate=target_rate,
-        collection_batch_size=collection_batch_size, dense_rewards=dense_rewards)
+        collection_batch_size=collection_batch_size, dense_rewards=dense_rewards,
+        quantile_kappa=quantile_kappa, tail_learning_rate=tail_learning_rate,
+        tail_policy_actions=tail_policy_actions, actor_warmup_updates=actor_warmup_updates,
+        actor_update_period=actor_update_period, action_gradient_clip=action_gradient_clip)
     if progress:
         _report("train_start", method=method, seed=seed, device=str(device),
                 options=options, expected_episode_rollouts=updates*collection_batch_size,
@@ -304,7 +340,7 @@ def train_model_free(method, train_bank, *, seed=7, updates=100, batch_size=32,
     target_actor, target_critic = deepcopy(actor).requires_grad_(False), deepcopy(critic).requires_grad_(False)
     actor_optimizer = torch.optim.Adam(actor.parameters(), lr=learning_rate)
     critic_optimizer = torch.optim.Adam(critic.quantiles.parameters(), lr=critic_learning_rate)
-    tail_optimizer = (torch.optim.Adam(critic.tail.parameters(), lr=critic_learning_rate)
+    tail_optimizer = (torch.optim.Adam(critic.tail.parameters(), lr=tail_learning_rate)
                       if critic.tail is not None else None)
     threshold_optimizer = torch.optim.Adam([zeta], lr=zeta_learning_rate)
     replay = _Replay(replay_capacity)
@@ -315,7 +351,22 @@ def train_model_free(method, train_bank, *, seed=7, updates=100, batch_size=32,
         saved = load_checkpoint(resume_from, method=method, config=config)
         # Early qualification snapshots predate the optional dense-label mode.
         saved["options"].setdefault("dense_rewards", False)
-        check_resume_options(saved, options)
+        for key, value in dict(quantile_kappa=1., tail_learning_rate=saved["options"]["critic_learning_rate"],
+                tail_policy_actions=False, actor_warmup_updates=0, actor_update_period=1,
+                action_gradient_clip=None).items():
+            saved["options"].setdefault(key, value)
+        saved_for_check = saved
+        previous_warmup = saved["options"]["actor_warmup_updates"]
+        if extend_frozen_warmup and actor_warmup_updates != previous_warmup:
+            if (actor_warmup_updates < previous_warmup or saved["step"] > previous_warmup
+                    or saved["actor_optimizer"]["state"] or saved["threshold_optimizer"]["state"]):
+                raise ValueError("warmup extension requires a checkpoint whose actor has never updated")
+            saved_for_check = dict(saved, options=dict(saved["options"],
+                                                       actor_warmup_updates=actor_warmup_updates))
+            if progress:
+                _report("extend_frozen_warmup", completed=saved["step"],
+                        previous=previous_warmup, new=actor_warmup_updates)
+        check_resume_options(saved_for_check, options)
         if saved["seed"] != seed:
             raise ValueError("resume requires the original training seed")
         actor.load_state_dict(saved["actor"])
@@ -350,19 +401,28 @@ def train_model_free(method, train_bank, *, seed=7, updates=100, batch_size=32,
             noise=exploration_noise, generator=generator, n_step=n_step, dense_rewards=dense_rewards)
         observed, actions, costs, next_observed, done = transitions
         replay.add((observed, actions, costs/return_scale, next_observed, done))
-        for _ in range(gradient_steps):
+        actor_updated = False
+        for gradient_step in range(gradient_steps):
             observed, actions, costs, next_observed, done = replay.sample(batch_size, generator)
             with torch.no_grad():
                 future = target_critic.distribution(next_observed, _targets(target_actor, next_observed, config))
                 target_losses = costs[:, None] + (~done)[:, None] * future
             predicted, _, _ = critic(observed, actions)
-            critic_loss = quantile_huber_loss(predicted, target_losses, critic.probabilities)
+            critic_loss = quantile_huber_loss(predicted, target_losses, critic.probabilities, quantile_kappa)
             critic_optimizer.zero_grad(set_to_none=True)
             critic_loss.backward()
             nn.utils.clip_grad_norm_(critic.quantiles.parameters(), 5., error_if_nonfinite=True)
             critic_optimizer.step()
             if tail_optimizer is not None:
-                tail_loss = critic.tail_loss(observed, actions)
+                tail_observed, tail_actions = observed, actions
+                if tail_policy_actions:
+                    # The author fits the tail at next-state target-policy
+                    # actions. Terminal states have no continuation value;
+                    # use their preceding state with the same target policy.
+                    tail_observed = torch.where(done[:, None], observed, next_observed)
+                    with torch.no_grad():
+                        tail_actions = _targets(target_actor, tail_observed, config)
+                tail_loss = critic.tail_loss(tail_observed, tail_actions)
                 tail_optimizer.zero_grad(set_to_none=True)
                 tail_loss.backward()
                 nn.utils.clip_grad_norm_(critic.tail.parameters(), 5., error_if_nonfinite=True)
@@ -372,21 +432,31 @@ def train_model_free(method, train_bank, *, seed=7, updates=100, batch_size=32,
             critic.requires_grad_(False)
             accumulated = (_accumulated_cost(observed, actor, config, bank.liability[0, 0])
                            if dense_rewards else observed.new_zeros(len(observed)))
-            actor_loss = (critic.expected_ru(observed, _targets(actor, observed, config),
+            actor_actions = _targets(actor, observed, config)
+            actor_values = (critic.expected_ru(observed, actor_actions,
                 (zeta.detach()-accumulated)/return_scale, config.risk.alpha)
-                + accumulated/return_scale).mean()
-            actor_optimizer.zero_grad(set_to_none=True)
-            actor_loss.backward()
-            nn.utils.clip_grad_norm_(actor.parameters(), 5., error_if_nonfinite=True)
-            actor_optimizer.step()
+                + accumulated/return_scale)
+            actor_loss = actor_values.mean()
+            global_gradient_step = (update-1)*gradient_steps+gradient_step+1
+            improve_actor = (update > actor_warmup_updates
+                             and global_gradient_step % actor_update_period == 0)
+            if improve_actor:
+                actor_optimizer.zero_grad(set_to_none=True)
+                surrogate = (actor_loss if action_gradient_clip is None else
+                             action_gradient_loss(actor_values, actor_actions, action_gradient_clip))
+                surrogate.backward()
+                nn.utils.clip_grad_norm_(actor.parameters(), 5., error_if_nonfinite=True)
+                actor_optimizer.step()
+                actor_updated = True
             # Only initial-state predictions define the global ES threshold.
             with torch.no_grad():
                 initial_actions = _targets(actor, initial_observed, config)
             threshold_loss = return_scale * critic.expected_ru(
                 initial_observed, initial_actions, zeta/return_scale, config.risk.alpha).mean()
-            threshold_optimizer.zero_grad(set_to_none=True)
-            threshold_loss.backward()
-            threshold_optimizer.step()
+            if improve_actor:
+                threshold_optimizer.zero_grad(set_to_none=True)
+                threshold_loss.backward()
+                threshold_optimizer.step()
             critic.requires_grad_(True)
             with torch.no_grad():
                 for target, current in zip(target_actor.parameters(), actor.parameters()):
@@ -399,7 +469,8 @@ def train_model_free(method, train_bank, *, seed=7, updates=100, batch_size=32,
             record = dict(completed=update, total=updates, elapsed_seconds=elapsed,
                 eta_seconds=elapsed*(updates-update)/update, replay_transitions=replay.size,
                 critic_loss=float(critic_loss.detach()), actor_ru_estimate=float(actor_loss.detach()*return_scale),
-                zeta=float(zeta.detach()), mean_exploration_loss=float(episode_losses.mean()))
+                zeta=float(zeta.detach()), mean_exploration_loss=float(episode_losses.mean()),
+                actor_updated=actor_updated)
             if tail_optimizer is not None:
                 record["gpd_nll"] = float(tail_loss.detach())
             history.append(record)
@@ -428,10 +499,14 @@ def train_model_free(method, train_bank, *, seed=7, updates=100, batch_size=32,
                     "uniform replay; Polyak targets; GPD inverse-CDF quadrature and analytic tail expectation"],
         seed=seed, device=str(device), options=options, config=asdict(config), history=history,
         zeta=float(zeta.detach()), threshold_units="portfolio_money", return_scale=float(return_scale),
+        quantile_kappa_money=quantile_kappa*float(return_scale),
+        initial_threshold_source="empirical quantile of exploratory initialization episodes",
         expected_episode_rollouts=updates*collection_batch_size, initialization_paths=len(initial_bank.spot),
         transition_count=updates*collection_batch_size*config.n_steps,
         replay_samples_per_insert=gradient_steps*batch_size/(collection_batch_size*config.n_steps),
         gradient_updates=updates*gradient_steps,
+        actor_gradient_updates=max(0, updates*gradient_steps//actor_update_period
+            - min(updates, actor_warmup_updates)*gradient_steps//actor_update_period),
         initialization_seconds=initialization_seconds,
         training_seconds=previous_seconds+time.perf_counter()-training_started,
         total_seconds=time.perf_counter()-started,

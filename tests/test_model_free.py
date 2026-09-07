@@ -11,7 +11,7 @@ from hedging_gym.evaluation import evaluate_controller
 from hedging_gym.finance import generate_market_bank
 from methods.controllers import policy_controller
 from methods.model_free import (DistributionalCritic, collect_episodes,
-    _accumulated_cost, gpd_expected_excess, gpd_nll, quantile_huber_loss, train_model_free)
+    _accumulated_cost, action_gradient_loss, gpd_expected_excess, gpd_nll, quantile_huber_loss, train_model_free)
 from methods.policies import DirectDHPolicy
 
 
@@ -26,6 +26,27 @@ def test_quantile_loss_and_pareto_tail_equations():
     scale, shape = torch.ones(3, dtype=torch.float64), torch.full((3,), .5, dtype=torch.float64)
     torch.testing.assert_close(gpd_expected_excess(cutoff, scale, shape), cutoff.new_tensor([3., 2., .8]))
     torch.testing.assert_close(gpd_nll(cutoff.clamp_min(0), scale, shape), 3*torch.log1p(.5*cutoff.clamp_min(0)))
+
+
+def test_pinball_loss_preserves_quantile_and_small_huber_approaches_it():
+    # At q=9, 90% of this empirical distribution is below q; the 95% pinball
+    # derivative must still move upward, independent of the return scale.
+    target = torch.arange(10, dtype=torch.float64)[None]
+    q = torch.tensor([[8.5]], dtype=torch.float64, requires_grad=True)
+    probability = torch.tensor([.95], dtype=torch.float64)
+    pinball = quantile_huber_loss(q, target, probability, 0)
+    gradient, = torch.autograd.grad(pinball, q)
+    torch.testing.assert_close(gradient, torch.tensor([[-.05]], dtype=torch.float64))
+    for scale in (.01, 1., 100.):
+        scaled = quantile_huber_loss(q*scale, target*scale, probability, .001*scale)/scale
+        torch.testing.assert_close(scaled, pinball, atol=.0005, rtol=0)
+
+
+def test_action_derivative_clipping_precedes_batch_average():
+    action = torch.zeros(2, 2, dtype=torch.float64, requires_grad=True)
+    values = (action*torch.tensor([[3., 4.], [0., .5]])).sum(-1)
+    action_gradient_loss(values, action, clip=1.).backward()
+    torch.testing.assert_close(action.grad, action.new_tensor([[.3, .4], [0., .25]]))
 
 
 def test_exdrl_tail_is_used_for_targets_and_actor_gradients():
@@ -91,7 +112,9 @@ def test_model_free_checkpoint_resume_matches_uninterrupted_training(tmp_path, m
     bank = generate_market_bank(config, 24, 811, dtype=torch.float64)
     options = dict(seed=7, batch_size=8, hidden=(8,), quantiles=32,
                    tail_threshold=.8, gradient_steps=2, replay_capacity=256, progress=False,
-                   dense_rewards=method == "exdrl")
+                   dense_rewards=method == "exdrl", actor_warmup_updates=1,
+                   actor_update_period=3, action_gradient_clip=1., quantile_kappa=.01,
+                   tail_learning_rate=1e-6, tail_policy_actions=True)
     full_path, split_path = tmp_path/"full.pt", tmp_path/"split.pt"
     full, _ = train_model_free(method, bank, updates=4, checkpoint_path=full_path, **options)
     train_model_free(method, bank, updates=2, checkpoint_path=split_path, **options)
@@ -107,6 +130,42 @@ def test_model_free_checkpoint_resume_matches_uninterrupted_training(tmp_path, m
                 torch.testing.assert_close(tensor, expected[name][key], rtol=0, atol=0)
     assert actual["replay"]["cursor"] == expected["replay"]["cursor"]
     assert (tmp_path/"split-early.pt").exists()
+
+
+def test_critic_warmup_freezes_actor_but_updates_critic(tmp_path):
+    config = benchmark_config(model="gbm", time_grid=TimeGrid(n_steps=3))
+    bank = generate_market_bank(config, 24, 811, dtype=torch.float64)
+    torch.manual_seed(7)
+    initial = DirectDHPolicy(config, hidden=(8,)).double()
+    policy, metadata = train_model_free("exdrl", bank, seed=7, updates=2, batch_size=8,
+        hidden=(8,), quantiles=32, tail_threshold=.8, gradient_steps=2,
+        actor_warmup_updates=2, tail_policy_actions=True, tail_learning_rate=1e-6,
+        checkpoint_path=tmp_path/"warmup.pt", progress=False)
+    for actual, expected in zip(policy.parameters(), initial.parameters()):
+        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+    saved = torch.load(tmp_path/"warmup.pt", weights_only=False)
+    assert saved["critic_optimizer"]["state"]
+    assert not saved["actor_optimizer"]["state"]
+    assert metadata["actor_gradient_updates"] == 0
+
+
+def test_explicit_frozen_warmup_extension_matches_declared_longer_run(tmp_path):
+    config = benchmark_config(model="gbm", time_grid=TimeGrid(n_steps=3))
+    bank = generate_market_bank(config, 24, 811, dtype=torch.float64)
+    options = dict(seed=7, batch_size=8, hidden=(8,), quantiles=32, tail_threshold=.8,
+                   gradient_steps=2, progress=False)
+    full, _ = train_model_free("exdrl", bank, updates=4, actor_warmup_updates=3, **options)
+    path = tmp_path/"frozen.pt"
+    train_model_free("exdrl", bank, updates=2, actor_warmup_updates=2, checkpoint_path=path, **options)
+    with pytest.raises(ValueError, match="saved training options"):
+        train_model_free("exdrl", bank, updates=4, actor_warmup_updates=3, resume_from=path, **options)
+    resumed, _ = train_model_free("exdrl", bank, updates=4, actor_warmup_updates=3,
+        resume_from=path, checkpoint_path=path, extend_frozen_warmup=True, **options)
+    for actual, expected in zip(resumed.parameters(), full.parameters()):
+        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+    with pytest.raises(ValueError, match="never updated"):
+        train_model_free("exdrl", bank, updates=5, actor_warmup_updates=5,
+            resume_from=path, extend_frozen_warmup=True, **options)
 
 
 def test_dense_rewards_preserve_terminal_loss_and_global_ru():

@@ -21,7 +21,7 @@ reproduce their paper tables. See [methods and sources](../methods/README.md).
 not that every method is a competitive comparator. Classical controls and CEM
 do not train neural networks; their decisions and accounting still need checking.
 
-## Qualification outcomes
+## Initial qualification outcomes
 
 | Method | Evidence | Remaining limitation |
 |---|---|---|
@@ -83,3 +83,44 @@ establish competitive recipes, freeze settings, then compare saved models on
 fresh common paths and multiple seeds. Report basic, operational and adaptation
 separately, including training and planning costs. These unsuccessful runs
 reject only their tested recipes, not the broader methods or thesis direction.
+
+## Training-signal repair
+
+The subsequent local repair leaves the financial package unchanged. It corrects
+RL action-gradient clipping and tail-fitting settings, aligns AlphaZero's global
+risk threshold with its value targets, and adds an optional stock SB3 PPO control.
+The same training/development banks and terminal ES95 evaluator are retained.
+
+| Adapter | Final development ES95 | Assessment |
+| --- | --- | --- |
+| SB3 PPO, three seeds | Sampled: 0.014425–0.024030; greedy: 0.010566–0.017501 | All learned useful hedges; still not better than the strongest DH controls |
+| QR-D4PG, three seeds | 0.150930 / 0.177547 / 0.066716 | Actor saturation repaired, but critic guidance becomes unreliable as the actor changes; all worse than their initial policies |
+| EX-D4PG, one seed | 0.066612 | Tail fitting improved, but actor performance still deteriorated; not competitively qualified |
+| AlphaZero, three short seeded runs | 0.273902 / 0.135041 / 0.097827 | Threshold consistency repaired; value accuracy and useful search remain unqualified |
+
+These are diagnostic endpoints, not selected best checkpoints or an equal-budget
+ranking. PPO used 512 complete episodes per rollout and 262,144 training episodes
+per seed. Its improvement over the earlier small probe cannot be attributed to
+batching alone: budget and training-bank reuse also changed. QR-D4PG used 200
+frozen-actor warmup updates followed by 300 actor-enabled collection updates;
+EX used 400 plus 300. AlphaZero used four self-play batches per seed, with
+separate completed-rollout value refitting. Its short runs do not reject the
+method at larger budgets. No additional tree evaluation was justified by the
+inconclusive value diagnostics.
+
+Initial critic checks are diagnostics, not arbitrary pass/fail barriers to
+studying a learner. Failed checks remain recorded. The later bounded actor runs
+test whether learning works despite those warnings; they do not certify the
+critics. Evaluation-bank results do not decide training continuation.
+
+The integrated suite passes 97 tests. New checks cover the changed equations,
+action gradients, reward/autoreset boundary and checkpoint behavior; experiment
+performance is assessed from saved runs, not asserted by unit tests.
+
+Artifacts, exact recipes, source notes and before/after checkpoints:
+`/home/max/Documents/hedging-gym-runs/repair-2026-09-07-uQK20L/`.
+Saved policies reload to identical losses on the same device; all final tapes
+reconcile to independent NumPy accounting within 1.2e-6. SB3 ZIP files establish
+inference reload parity, not exact custom-environment training continuation.
+Merge and push remain held; the weak adapters must not be used to claim a new
+method beats strong implementations of the literature.
