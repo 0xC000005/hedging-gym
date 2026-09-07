@@ -95,6 +95,16 @@ def test_stock_training_resume_and_independent_ledger(algorithm, tmp_path):
     for field in ("observations", "next_observations", "actions", "rewards", "dones"):
         np.testing.assert_array_equal(getattr(expected_replay, field), getattr(loaded.replay_buffer, field))
     for deterministic in (True, False):
+        observed = torch.from_numpy(loaded._last_obs)
+        # Identical sampling RNG isolates inference/action-coordinate parity.
+        with torch.random.fork_rng():
+            torch.manual_seed(823)
+            prediction, _ = loaded.predict(loaded._last_obs, deterministic=deterministic)
+            expected_targets = loaded_env.lower + (prediction+1.) * (loaded_env.upper-loaded_env.lower) / 2.
+            torch.manual_seed(823)
+            actual_targets = off_policy_controller(loaded, deterministic=deterministic)(
+                observed, loaded_env.tensor_env.state, 0, config)
+        np.testing.assert_array_equal(actual_targets.numpy(), expected_targets)
         _, tape = evaluate_controller(off_policy_controller(loaded, deterministic=deterministic), bank)
         reference = numpy_ledger(bank.marks.numpy(), tape["positions"].numpy(),
             bank.liability[:,0].numpy(), bank.liability[:,-1].numpy(), config)

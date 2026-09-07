@@ -17,7 +17,6 @@ from stable_baselines3.common.buffers import ReplayBuffer
 
 from hedging_gym.config import RiskConfig
 from hedging_gym.gym_env import TensorHedgingEnv
-from methods.sb3 import sb3_controller
 
 
 ALGORITHMS = {"crossq": CrossQ, "tqc": TQC}
@@ -82,8 +81,25 @@ def build_off_policy(algorithm, env, *, seed=7, device="cpu", buffer_size=1_000_
 
 
 def off_policy_controller(model, *, deterministic=True):
-    """Use upstream predict and the existing exact affine holding transform."""
-    controller = sb3_controller(model, deterministic=deterministic)
+    """Frozen SAC-family actor inference in the trainer's normalized Box.
+
+    CrossQ/TQC actors already squash into [-1, 1]. Preserve SB3 predict's
+    floating-point unscale operation even for this identity Box, then map
+    normalized actions to holdings. No PPO distribution API is involved.
+    """
+    if not (np.all(model.action_space.low == -1.) and np.all(model.action_space.high == 1.)):
+        raise ValueError("off-policy hedging expects the normalized [-1,1] action Box")
+
+    @torch.no_grad()
+    def controller(observed, ledger, time_index, config):
+        model.policy.set_training_mode(False)
+        features = observed.to(device=model.device, dtype=torch.float32)
+        action = model.actor(features, deterministic=deterministic)
+        action = (-1. + .5 * (action + 1.) * 2.).to(device=observed.device)
+        lower = observed.new_tensor(config.execution.vector("holding_lower", config.n_assets))
+        upper = observed.new_tensor(config.execution.vector("holding_upper", config.n_assets))
+        return lower + (action + 1.) * (upper-lower) / 2.
+
     controller.action_selection = f"SB3-Contrib {type(model).__name__} " + (
         "deterministic" if deterministic else "sampled")
     return controller
