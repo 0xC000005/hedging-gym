@@ -7,7 +7,8 @@ import numpy as np
 import pytest
 import torch
 
-from hedging_gym import finance
+from hedging_gym import finance, benchmark_config, TimeGrid, ExecutionConfig, config_from_dict
+from hedging_gym.config import market_from_dict
 from hedging_gym.gym_env import HedgingVectorEnv
 
 
@@ -43,7 +44,7 @@ def quantlib_price(model, spot, variance, days, strike, config, *, tolerance=1e-
     not torch.cuda.is_available(), reason="CUDA unavailable"))])
 @pytest.mark.parametrize("model", ["gbm", "bates"])
 def test_prices_and_spot_delta_gamma_match_quantlib(model, device):
-    config = finance.common_config(model=model)
+    config = market_from_dict({"model": model})
     states = [(1., .04, 1, 1.), (1., .04, 30, 1.), (.8, .02, 60, 1.),
               (1.2, .09, 60, 1.), (1., .002, 30, 1.05)]
     candidate = finance.call_price(torch.tensor([x[0] for x in states], dtype=torch.float64, device=device),
@@ -65,7 +66,7 @@ def test_prices_and_spot_delta_gamma_match_quantlib(model, device):
     not torch.cuda.is_available(), reason="CUDA unavailable"))])
 def test_bates_original_jump_tail_greek_failures_match_tight_quantlib(monkeypatch, device):
     # Original 65,536-path refinement failures: day 17 and day 22, both contracts.
-    config = finance.common_config(model="bates")
+    config = market_from_dict({"model": "bates"})
     states = [(.36072667085931887, .044018864068017205, days) for days in (13, 43)]
     states += [(.30895303443070593, .02160032323403851, days) for days in (8, 38)]
     spot = torch.tensor([x[0] for x in states], dtype=torch.float64, device=device, requires_grad=True)
@@ -91,10 +92,10 @@ def test_bates_original_jump_tail_greek_failures_match_tight_quantlib(monkeypatc
 
 @pytest.mark.parametrize("model", ["gbm", "heston", "bates"])
 def test_selected_market_prices_and_shared_gym_gradients(model):
-    config = finance.common_config(model=model, n_steps=3, fixed_ticket=(.0001, .0001))
-    assert finance.config_from_dict(asdict(config)) == config
-    price = finance.call_price(torch.tensor(1., dtype=torch.float64), .04, 30 / 252, 1., config)
-    assert float(price) == pytest.approx(finance.quantlib_call_price(1., .04, 30 / 252, 1., config), abs=1e-8)
+    config = benchmark_config(model=model, time_grid=TimeGrid(n_steps=3), execution=ExecutionConfig(fixed_ticket=.0001))
+    assert config_from_dict(asdict(config)) == config
+    price = finance.call_price(torch.tensor(1., dtype=torch.float64), .04, 30 / 252, 1., config.market)
+    assert float(price) == pytest.approx(finance.quantlib_option_price(1., .04, 30 / 252, 1., config.market), abs=1e-8)
     env = HedgingVectorEnv(8, config, simulation_substeps=4)
     observed, _ = env.reset_tensor(seed=19)
     assert observed.shape == (8, len(finance.observation_fields(config)))
@@ -114,12 +115,12 @@ def test_selected_market_prices_and_shared_gym_gradients(model):
 
 
 def test_refined_heston_paths_repeat_and_keep_original_trading_grid():
-    config = finance.common_config(n_steps=3)
-    spot, variance = finance.simulate_market_paths(config, 8, 1967, substeps=4)
-    repeated = finance.simulate_market_paths(config, 8, 1967, substeps=4)
+    config = benchmark_config(time_grid=TimeGrid(n_steps=3))
+    spot, variance = finance.simulate_market_paths(config.market, config.time_grid, 8, 1967, substeps=4)
+    repeated = finance.simulate_market_paths(config.market, config.time_grid, 8, 1967, substeps=4)
     assert spot.shape == variance.shape == (8, 4)
     assert torch.equal(spot, repeated[0]) and torch.equal(variance, repeated[1])
     assert torch.isfinite(spot).all() and torch.isfinite(variance).all()
     assert (spot > 0).all() and (variance >= 0).all()
-    torch.testing.assert_close(spot[:, 0], torch.full((8,), config.spot0, dtype=torch.float64))
-    torch.testing.assert_close(variance[:, 0], torch.full((8,), config.v0, dtype=torch.float64))
+    torch.testing.assert_close(spot[:, 0], torch.full((8,), config.market.spot0, dtype=torch.float64))
+    torch.testing.assert_close(variance[:, 0], torch.full((8,), config.market.v0, dtype=torch.float64))

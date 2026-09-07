@@ -1,16 +1,15 @@
 """Independent price, cash-ledger and pathwise derivative checks."""
 
-from dataclasses import replace
-
 import numpy as np
 import pytest
 import torch
 
-from hedging_gym import finance
+from hedging_gym import (finance, benchmark_config, HestonConfig, TimeGrid,
+                         PortfolioConfig, EuropeanOption, ExecutionConfig)
 
 
 def test_heston_prices_and_delta_match_quantlib_in_short_and_rare_states():
-    config = finance.common_config()
+    config = HestonConfig()
     states = [(1., .04, 30, 1.), (1., .04, 60, .95), (1., .04, 90, 1.05),
               (1., .04, 1, 1.), (.7, .002, 1, 1.), (1., .0001, 1, 1.),
               (.9, .001, 30, 1.05), (1.3, .2, 1, 1.), (1., .005, 30, 1.),
@@ -19,21 +18,24 @@ def test_heston_prices_and_delta_match_quantlib_in_short_and_rare_states():
         torch.tensor([s for s, v, n, k in states], dtype=torch.float64),
         [v for s, v, n, k in states], [n / 252 for s, v, n, k in states],
         [k for s, v, n, k in states], config).numpy()
-    reference = [finance.quantlib_call_price(s, v, n / 252, k, config)
+    reference = [finance.quantlib_option_price(s, v, n / 252, k, config)
                  for s, v, n, k in states]
     np.testing.assert_allclose(candidate, reference, atol=1e-8, rtol=1e-7)
     assert finance.call_price(torch.tensor(1.2), .04, 0., 1., config).item() == pytest.approx(.2)
     spot = torch.tensor(1., dtype=torch.float64, requires_grad=True)
     delta, = torch.autograd.grad(finance.call_price(spot, .04, 30 / 252, 1., config), spot)
     bump = 1e-5
-    ql_delta = (finance.quantlib_call_price(1 + bump, .04, 30 / 252, 1., config)
-                - finance.quantlib_call_price(1 - bump, .04, 30 / 252, 1., config)) / (2 * bump)
+    ql_delta = (finance.quantlib_option_price(1 + bump, .04, 30 / 252, 1., config)
+                - finance.quantlib_option_price(1 - bump, .04, 30 / 252, 1., config)) / (2 * bump)
     assert delta.item() == pytest.approx(ql_delta, abs=1e-8, rel=1e-7)
 
 
 def test_ledger_matches_numpy_cash_and_derivative_with_real_tickets():
-    config = replace(finance.HestonConfig(), n_steps=3, quadratic=(.002, .003, .003),
-                     fixed_ticket=(.0001, .0001, .0001))
+    config = benchmark_config(time_grid=TimeGrid(n_steps=3),
+        portfolio=PortfolioConfig(EuropeanOption(1., 3/252),
+            (EuropeanOption(.95, 60/252), EuropeanOption(1.05, 90/252))),
+        execution=ExecutionConfig(holding_upper=(2., 1., 1.), proportional=(.0005, .01, .01),
+            quadratic=(.002, .003, .003), fixed_ticket=.0001))
     bank = finance.generate_market_bank(config, 3, 19, dtype=torch.float64)
     positions = torch.tensor([[[.4, .1, -.1], [.4, .1, -.1], [.7, 0., .2]],
                               [[0., 0., 0.], [.3, -.2, .2], [.2, -.3, .1]],
@@ -63,7 +65,7 @@ def test_ledger_matches_numpy_cash_and_derivative_with_real_tickets():
 
 
 def test_causal_features_legal_maps_and_unhedged_payoff():
-    config = finance.common_config(n_steps=2)
+    config = benchmark_config(time_grid=TimeGrid(n_steps=2))
     bank = finance.generate_market_bank(config, 4, 7, dtype=torch.float64)
     state = finance.initial_state(bank)
     original = finance.observation(bank, 0, state)
@@ -76,10 +78,10 @@ def test_causal_features_legal_maps_and_unhedged_payoff():
     changed.liability[:, 1:] *= 6
     torch.testing.assert_close(finance.observation(changed, 0, state), original)
     actions = finance.map_action(torch.tensor([[-1e4, 1e4]], dtype=torch.float64), config)
-    assert bool((actions >= torch.tensor(config.holding_lower)).all())
-    assert bool((actions <= torch.tensor(config.holding_upper)).all())
+    assert bool((actions >= torch.tensor(config.execution.holding_lower)).all())
+    assert bool((actions <= torch.tensor(config.execution.holding_upper)).all())
     unhedged = finance.ledger_from_positions(bank, torch.zeros((4, 2, 2), dtype=torch.float64))
     torch.testing.assert_close(unhedged["terminal_loss"], bank.liability[:, -1] - bank.liability[:, 0])
     marks, liability = finance.mark_state(bank.spot[:, -1], bank.variance[:, -1], config.n_steps, config)
-    torch.testing.assert_close(liability, (bank.spot[:, -1] - config.liability_strike).clamp_min(0))
+    torch.testing.assert_close(liability, (bank.spot[:, -1] - config.portfolio.liability.strike).clamp_min(0))
     assert bool((marks[:, 1:] > 0).all())

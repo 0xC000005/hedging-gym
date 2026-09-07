@@ -1,4 +1,4 @@
-"""Tiny DEVELOPMENT comparison: existing classical, direct DH and NTB adapters.
+"""Small baseline comparison: existing classical, direct DH and NTB adapters.
 
 Run from a checkout: uv run --frozen python -m experiments.baselines.
 The default is a short CPU integration example, not a scientific benchmark.
@@ -14,6 +14,7 @@ import torch
 
 from hedging_gym.evaluation import evaluate_controller
 from hedging_gym.benchmark import benchmark_config
+from hedging_gym.config import RiskConfig, TimeGrid
 from hedging_gym.finance import BANK_FIELDS, generate_market_bank
 
 from methods.controllers import classical_controller, policy_controller
@@ -29,7 +30,12 @@ def _parser():
     parser.add_argument("--eval-paths", type=int, default=128)
     parser.add_argument("--updates", type=int, default=8)
     parser.add_argument("--batch-size", type=int, default=32)
-    parser.add_argument("--steps", type=int, default=30)
+    parser.add_argument("--steps", type=int, default=TimeGrid().n_steps)
+    parser.add_argument("--days-per-year", type=int, choices=(252, 365, 360),
+                        default=TimeGrid().days_per_year,
+                        help="year clock for trading and contract maturities")
+    parser.add_argument("--risk-alpha", type=float,
+                        help="terminal expected-shortfall confidence; defaults to RiskConfig")
     parser.add_argument("--hidden", nargs="+", type=int, default=[32, 32])
     parser.add_argument("--seed", type=int, default=7, help="policy initialization/minibatch seed")
     parser.add_argument("--train-seed", type=int, default=1101)
@@ -63,10 +69,12 @@ def main(argv=None):
     if args.device == "cuda" and not torch.cuda.is_available():
         raise RuntimeError("CUDA was requested but is unavailable; select --device cpu")
     torch.set_num_threads(args.threads)
-    config = benchmark_config(model=args.model, n_steps=args.steps)
+    config = benchmark_config(model=args.model,
+        time_grid=TimeGrid(n_steps=args.steps, days_per_year=args.days_per_year),
+        risk=RiskConfig() if args.risk_alpha is None else RiskConfig(alpha=args.risk_alpha))
     methods = list(dict.fromkeys(args.methods))
     started = time.perf_counter()
-    _report("development_start", label="DEVELOPMENT / ADAPTATION; no publication comparison",
+    _report("development_start", label="Baseline comparison",
             config=asdict(config), device=args.device, workers=args.threads,
             policy_seed=args.seed, train_seed=args.train_seed, eval_seed=args.eval_seed,
             methods=methods, updates_per_method=args.updates, batch_size=args.batch_size,
@@ -92,18 +100,18 @@ def main(argv=None):
     }
     evaluations, tapes = {}, {}
     for name, controller in controllers.items():
-        label = METHOD_LABELS.get(name, "ADAPTATION / model-priced "+name)
+        label = METHOD_LABELS.get(name, "Model-priced "+name)
         evaluations[name], tapes[name] = evaluate_controller(
             controller, heldout, device=args.device, batch_size=args.batch_size,
-            label="DEVELOPMENT / "+label, progress=True,
+            label=label, progress=True,
             zeta=training[name]["zeta"] if name in training else None)
         _report("heldout_result", method=name, eval_seed=args.eval_seed, **evaluations[name])
-    summary = dict(label="DEVELOPMENT / ADAPTATION; no publication comparison",
+    summary = dict(label="Baseline comparison",
                    config=asdict(config), arguments={**vars(args), "output_dir": str(args.output_dir) if args.output_dir else None},
                    training=training, evaluation=evaluations,
                    training_bank_seconds=train_bank_seconds, heldout_bank_seconds=eval_bank_seconds,
                    total_seconds_before_optional_save=time.perf_counter()-started,
-                   scope="One tiny training seed and shared held-out paths; no model selection, HPO or superiority claim",
+                   scope="Small integration run with one training seed; not comparative research evidence",
                    execution="Continuous basic targets; lot and minimum-order adaptations are not implemented")
     if args.output_dir:
         args.output_dir.mkdir(parents=True, exist_ok=True)
@@ -111,12 +119,13 @@ def main(argv=None):
                     "seed": args.eval_seed}, args.output_dir/"heldout-bank.pt")
         torch.save(tapes, args.output_dir/"evaluation-tapes.pt")
         for name, policy in policies.items():
-            torch.save({"policy": {key: value.detach().cpu() for key, value in policy.state_dict().items()},
+            torch.save({"policy": {key: value.detach().cpu() if isinstance(value, torch.Tensor) else value
+                                    for key, value in policy.state_dict().items()},
                         "metadata": training[name]}, args.output_dir/(name+"-checkpoint.pt"))
         (args.output_dir/"comparison.json").write_text(json.dumps(summary, indent=2, allow_nan=False)+"\n")
     _report("development_complete", total_seconds=time.perf_counter()-started,
             methods=list(controllers), output_dir=str(args.output_dir) if args.output_dir else None,
-            claim="Implementation exercise only; tail estimates from this tiny run are not publication evidence")
+            claim="See the saved configuration, training budget and held-out sample before interpreting results")
     return summary
 
 

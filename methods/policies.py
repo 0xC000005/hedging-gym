@@ -1,9 +1,7 @@
-"""ADAPTATION: bounded Deep Hedging and learned no-transaction-band policies.
+"""Bounded Deep Hedging and learned no-transaction-band policies.
 
-Imported from Thesis-Experiments' directions/adaptive_option_control/heston_v1/
-policies.py; see methods/README.md for provenance and scope. The source network
-and action equations are retained. These continuous policies do not implement
-lot-size or minimum-order feasibility, or a fixed-ticket boundary estimator.
+See methods/README.md for method attribution. These continuous policies do not
+parameterize lot sizes or minimum orders, or estimate fixed-ticket gate gradients.
 """
 
 from __future__ import annotations
@@ -13,6 +11,9 @@ from typing import Sequence
 
 import torch
 from torch import Tensor, nn
+
+from hedging_gym.config import HedgingConfig
+from hedging_gym.finance import instrument_names, observation_fields
 
 
 HOLD, BUY, SELL = 0, 1, 2
@@ -53,7 +54,40 @@ def _bounds(
     return torch.broadcast_to(lo, holdings.shape), torch.broadcast_to(hi, holdings.shape)
 
 
-class DirectDHPolicy(nn.Module):
+class _ConfiguredPolicy(nn.Module):
+    """Policy geometry follows the environment's ordered financial schema."""
+
+    def __init__(self, config: HedgingConfig):
+        super().__init__()
+        if not isinstance(config, HedgingConfig):
+            raise TypeError("construct a policy with HedgingConfig or use from_env(env)")
+        self.observation_fields = tuple(observation_fields(config))
+        self.instrument_names = tuple(instrument_names(config))
+        self.feature_dim = len(self.observation_fields)
+        self.n_assets = config.n_assets
+
+    @classmethod
+    def from_env(cls, env, **kwargs):
+        """Build from the same config used by a scalar or batched environment."""
+        return cls(env.config, **kwargs)
+
+    def check_config(self, config):
+        """Allow observed parameter changes, rejecting different field meanings."""
+        if (tuple(observation_fields(config)) != self.observation_fields
+                or tuple(instrument_names(config)) != self.instrument_names):
+            raise ValueError("policy observation/instrument schema differs from the environment config")
+
+    def get_extra_state(self):
+        """Keep field meanings with saved weights, including same-width books."""
+        return dict(observation_fields=self.observation_fields,
+                    instrument_names=self.instrument_names)
+
+    def set_extra_state(self, state):
+        if state != self.get_extra_state():
+            raise ValueError("checkpoint observation/instrument schema differs from this policy")
+
+
+class DirectDHPolicy(_ConfiguredPolicy):
     """Direct Deep Hedging with smooth bounded absolute target holdings.
 
     Pass the shared causal observation features, including current
@@ -64,11 +98,10 @@ class DirectDHPolicy(nn.Module):
     """
 
     def __init__(
-        self, feature_dim: int, n_assets: int = 3, hidden: Sequence[int] = (64, 64),
+        self, config: HedgingConfig, hidden: Sequence[int] = (64, 64),
     ):
-        super().__init__()
-        self.feature_dim, self.n_assets = feature_dim, n_assets
-        self.continuous = _network(feature_dim, n_assets, hidden)
+        super().__init__(config)
+        self.continuous = _network(self.feature_dim, self.n_assets, hidden)
 
     def forward(
         self, features: Tensor, holdings: Tensor, lower, upper, *,
@@ -83,7 +116,7 @@ class DirectDHPolicy(nn.Module):
         return PolicyAction(target, modes, features.new_zeros(features.shape[0]))
 
 
-class NoTransactionBandPolicy(nn.Module):
+class NoTransactionBandPolicy(_ConfiguredPolicy):
     """Learn bounded bands and clamp previous holdings into them, giving hold.
 
     This adapts the established PFHedge/Imaki no-transaction-band construction.
@@ -95,16 +128,15 @@ class NoTransactionBandPolicy(nn.Module):
     """
 
     def __init__(
-        self, feature_dim: int, n_assets: int = 3, hidden: Sequence[int] = (64, 64),
+        self, config: HedgingConfig, hidden: Sequence[int] = (64, 64),
         *, initial_width_logit: float = -3.0,
     ):
-        super().__init__()
-        self.feature_dim, self.n_assets = feature_dim, n_assets
-        self.continuous = _network(feature_dim, 3 * n_assets, hidden)
+        super().__init__(config)
+        self.continuous = _network(self.feature_dim, 3 * self.n_assets, hidden)
         # Narrow initial bands avoid an initial always-hold policy with zero
         # pathwise learning signal. Tune the width on development data.
         with torch.no_grad():
-            self.continuous[-1].bias.reshape(n_assets, 3)[:, 1:] = initial_width_logit
+            self.continuous[-1].bias.reshape(self.n_assets, 3)[:, 1:] = initial_width_logit
 
     def bands(
         self, features: Tensor, holdings: Tensor, lower, upper,

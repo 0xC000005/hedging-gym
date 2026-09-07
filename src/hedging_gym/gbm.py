@@ -8,14 +8,14 @@ from __future__ import annotations
 import torch
 
 
-def gbm_transition(spot, variance, shocks=None, config=None, *, generator=None):
+def gbm_transition(spot, variance, shocks=None, config=None, *, dt, generator=None):
     """Exact GBM step; channel 2 is the stock normal in the common shock tuple.
 
     Variance stays constant along each path. Channels 0/1 are unused, keeping
     conditional search compatible with the common three-channel interface.
     """
     if config is None:
-        from .finance import GBMConfig
+        from .config import GBMConfig
         config = GBMConfig()
     spot, variance = torch.broadcast_tensors(spot, variance)
     if shocks is None:
@@ -25,8 +25,8 @@ def gbm_transition(spot, variance, shocks=None, config=None, *, generator=None):
         if shocks.shape[-1] != 3:
             raise ValueError("GBM requires three shock channels; stock normal is channel 2")
         spot, variance, normal = torch.broadcast_tensors(spot, variance, shocks[..., 2])
-    next_spot = spot * torch.exp((config.mu - .5 * variance) * config.dt
-                                + (variance * config.dt).sqrt() * normal)
+    next_spot = spot * torch.exp((config.mu - .5 * variance) * dt
+                                + (variance * dt).sqrt() * normal)
     return next_spot, variance
 
 

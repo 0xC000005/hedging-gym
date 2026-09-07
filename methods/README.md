@@ -1,64 +1,88 @@
-# Initial baseline adapters
+# Method adapters
 
-These checkout-only modules begin the algorithm migration. The installable
-`hedging_gym` wheel contains the environment and evaluator; it does not contain
-learners. All methods use the same current observation, initial capital,
-execution constraints, cash ledger and complete terminal-loss evaluator.
+These checkout modules provide small classical and trainable baselines around
+the same market, observations, legal trades and cash ledger. The installable
+`hedging_gym` package contains the environment and evaluator; learners remain
+outside it.
 
-The source is private `Thesis-Experiments` revision
-`293dfc70b04109603e7f0d645baac0144c5b19d5`, under
-`directions/adaptive_option_control/heston_v1/`:
+| Adapter | Behavior |
+|---|---|
+| `classical.py` | Current model-price sensitivities and bounded stock/option hedge targets |
+| `controllers.py` | Common evaluation interface for classical controls and frozen policies |
+| `policies.py` | Direct bounded holdings and learned no-transaction bands |
+| `training.py` | Causal rollouts and a shared terminal expected-shortfall objective |
 
-| Adapter | Retained source and adaptation |
-| --- | --- |
-| `policies.py` | `DirectDHPolicy`, `NoTransactionBandPolicy` and shared helpers from source `policies.py`; network and action equations retained. |
-| `classical.py` | Source spot delta, gamma and variance Greeks, bounded stock/call sensitivity matching and stock band; only core imports and obsolete compatibility aliases changed. |
-| `controllers.py` | Classical controller and deterministic policy adapter from source `common_eval.py`, exposing no future bank state. |
-| `training.py` | Source `run.py` causal rollout, global Rockafellar–Uryasev ES95 threshold, Adam parameter groups, independent minibatch generator and gradient clipping. The small rollout calls `TensorHedgingEnv`; there is no second cash ledger. |
+The direct policy follows the
+[Deep Hedging](https://arxiv.org/abs/1802.03042v1) approach. The band policy adapts
+[Imaki et al.](https://arxiv.org/abs/2103.01775v1) and
+[PFHedge's pinned example](https://github.com/pfnet-research/pfhedge/blob/1fc08c73756bc6350f6a66977a5be97497d3bca0/README.md):
+it learns a center and bounded widths per instrument and keeps existing holdings
+within the band. These are adaptations of established methods. Classical
+sensitivities match local price changes rather than minimizing terminal ES;
+variance sensitivity means `d/dv`, not `d/dsqrt(v)`.
 
-The direct bounded-target policy is a finance adaptation in the
-[Deep Hedging](https://arxiv.org/abs/1802.03042) tradition. The learned band
-retains the established clamp-to-band construction attributed in the donor to
-[PFHedge's pinned NoTransactionBandNet example](https://github.com/pfnet-research/pfhedge/blob/1fc08c73756bc6350f6a66977a5be97497d3bca0/README.md)
-and [Imaki et al.](https://arxiv.org/abs/2103.01775). It learns a center and two
-bounded widths per instrument in the shared market/portfolio state. This is
-an **ADAPTATION**, not a literal paper reproduction or a new architecture.
-Classical controls match current model-price derivatives under shared caps;
-they do not minimize ES. Variance sensitivity is `d/dv`, not `d/dsqrt(v)`.
+## Run the example
 
-Run the development example from the repository root:
+From the repository root after `uv sync --locked`:
 
 ```bash
 uv run --frozen python -m experiments.baselines
-uv run --frozen python -m experiments.baselines --device cuda
+uv run --frozen python -m experiments.baselines --help
 ```
 
-Defaults use `benchmark_config("basic")`, keeping the common stock/60-day-call
-book, complete execution-feature observation and 30 daily decisions, and train
-DH and NTB for 8 updates each (batch 32; hidden layers 32, 32) on 128 paths,
-then evaluate both plus delta, a predeclared 0.05 stock-quantity delta band,
-delta-gamma and delta-variance on one shared, separate 128-path bank.
-Policy seed is 7; training bank seed 1101; held-out bank seed 2201. One CPU
-thread is the default. The selected device also generates the banks; equal
-seeds across CPU/CUDA are not a promise of identical numerical paths.
+The default CPU run uses the basic benchmark, 128 training paths and a separate
+128-path evaluation bank. It trains each selected learned policy for eight
+updates with minibatches of 32 and hidden layers of size 32, 32. The standard
+comparison includes delta, a fixed stock-quantity delta band, delta-gamma,
+delta-variance, direct Deep Hedging and a learned band. Policy seed is 7;
+training and evaluation bank seeds are 1101 and 2201.
 
-`--output-dir /path/outside/git` optionally saves compact metadata, final policy
-weights, the held-out market bank and each controller's holdings/loss tape for
-independent cash reconstruction. Models are frozen before the evaluation bank
-is generated; no checkpoint or band is selected on those results. Progress
-prints configuration, work, seeds, device, timings and estimates to completion.
+Use `--steps`, `--days-per-year` and `--risk-alpha` to change the decision count,
+annualization convention and terminal-risk confidence independently. For example:
 
-This tiny run checks integration only. Its training budget and tail sample are
-too small for a performance claim. Timing reports bank preparation, learner
-setup/training, and whole evaluator time separately; no speedup claim is made.
-A formal comparison still needs declared budgets, strong developed baselines,
-fresh paths, multiple training seeds, and independent financial qualification.
+```bash
+uv run --frozen python -m experiments.baselines --model gbm --steps 20 --days-per-year 365 --risk-alpha 0.99
+```
 
-Continuous DH/NTB do not yet have an action parameterization for minimum-order
-sizes or contract lots. Training rejects those configurations. All controller
-targets reach the core unchanged and illegal trades raise; no rounding or
-straight-through estimator is inserted. Fixed-ticket fees also create missing
-moving-boundary terms in ordinary pathwise training, especially for learned
-hold bands. These controls are not claimed to be qualified across every
-operational overlay. Hybrid HPO, native external stacks, impulse policies,
-adaptation schedules and future architectures are outside this initial import.
+`--device cuda` selects a compatible CUDA installation. `--output-dir` saves
+configuration, weights, the held-out market bank and trade tapes to a directory
+you choose outside Git. Policies are frozen before generating the evaluation
+bank. Progress reports configuration, seeds, device, workload and timings.
+
+This small run demonstrates training and evaluation. It has too little training
+and too few tail observations to support a hedging-quality claim. Interpret
+timings separately for bank preparation, training and evaluation; equal seeds
+across devices do not guarantee equal paths.
+
+## Execution and evaluation limits
+
+Derive policy input and output sizes from the configured observation schema and
+asset count. Evaluate all methods with the same portfolio, execution rules,
+capital, risk level and fresh market paths.
+
+The policy constructors take the configuration directly. `from_env` uses the
+same configuration as an existing scalar or batched environment:
+
+```python
+from hedging_gym import HedgingEnv, benchmark_config
+from methods.policies import DirectDHPolicy
+
+env = HedgingEnv(benchmark_config(model="gbm"))
+policy = DirectDHPolicy.from_env(env, hidden=(32, 32))
+env.close()
+```
+
+Saved policy state retains its observation and instrument schema. Reuse across
+observed parameter changes is allowed; a different schema must be matched by a
+corresponding policy, even when the total feature count happens to be equal.
+
+The continuous learned policies do not parameterize discrete lot sizes or
+minimum orders; training rejects those settings. Hard fixed-ticket activation
+also has no ordinary pathwise gradient. A method needs an appropriate treatment
+of those decisions before results under discontinuous costs can be interpreted
+as optimized hedging. Targets enter the common ledger without implicit rounding.
+
+The observed A → B → A evaluator can retain a caller's learner and update
+callback across episodes, but this example is not a trained adaptation study.
+See [Benchmark](../docs/benchmark.md), [Validation](../docs/validation.md) and
+[Related work](../docs/related-work.md) for the shared contract and evidence scope.

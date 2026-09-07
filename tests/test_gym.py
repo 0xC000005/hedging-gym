@@ -8,11 +8,15 @@ from gymnasium.vector import AutoresetMode, VectorEnv
 from gymnasium.wrappers.vector import RecordEpisodeStatistics
 
 from hedging_gym import finance, gym_env
+from hedging_gym.benchmark import benchmark_config
+from hedging_gym.config import ExecutionConfig, RiskConfig, TimeGrid
+from hedging_gym.evaluation import evaluate_controller
 from hedging_gym.gym_env import HedgingEnv, HedgingVectorEnv, TensorHedgingEnv
 
 
 def test_tensor_terminal_accounting_and_gradients_match_independent_cash():
-    config = finance.common_config(n_steps=3, fixed_ticket=(.0001, .0001))
+    config = benchmark_config(time_grid=TimeGrid(n_steps=3),
+                              execution=ExecutionConfig(fixed_ticket=.0001))
     bank = finance.generate_market_bank(config, 4, 709, dtype=torch.float64)
     positions = torch.tensor([[[.2, .1], [.2, .1], [.4, .2]]], dtype=torch.float64).repeat(4, 1, 1)
     positions.requires_grad_()
@@ -33,16 +37,16 @@ def test_tensor_terminal_accounting_and_gradients_match_independent_cash():
 
 
 def test_scalar_gym_api_and_exact_terminal_risk_objective():
-    config = finance.common_config(n_steps=3)
+    config = benchmark_config(time_grid=TimeGrid(n_steps=3), risk=RiskConfig(alpha=.99))
     env = HedgingEnv(config)
     check_env(env, skip_render_check=True)
     env.close()
-    env = HedgingEnv(config, risk_threshold=.02)
+    env = HedgingEnv(config, risk_threshold=-.02)
     env.reset(seed=741)
     for _ in range(config.n_steps):
         _, reward, done, _, info = env.step(np.zeros(2, dtype=np.float32))
     assert done
-    assert np.isclose(reward, -.02 - max(float(info["terminal_loss"]) - .02, 0.) / .05)
+    assert np.isclose(reward, .02 - max(float(info["terminal_loss"]) + .02, 0.) / .01)
     env.close()
 
 
@@ -52,7 +56,7 @@ def test_refinement_preserves_configuration_and_trading_dates(monkeypatch):
         calls.append(kwargs["substeps"])
         return finance.generate_market_bank(config, n_paths, seed, **kwargs)
     monkeypatch.setattr(gym_env, "generate_market_bank", generate)
-    config = finance.common_config(n_steps=3)
+    config = benchmark_config(time_grid=TimeGrid(n_steps=3))
     for env in (HedgingEnv(config, simulation_substeps=4), HedgingVectorEnv(2, config, simulation_substeps=16)):
         env.reset(seed=421)
         bank = env._tensor_env._bank
@@ -65,8 +69,9 @@ def test_refinement_preserves_configuration_and_trading_dates(monkeypatch):
 
 
 def test_vector_reset_terminal_info_and_standard_wrapper():
-    config = finance.common_config(n_steps=3, fixed_ticket=(.0001, .0001))
-    env = HedgingVectorEnv(4, config, risk_threshold=.02)
+    config = benchmark_config(time_grid=TimeGrid(n_steps=3), risk=RiskConfig(alpha=.90),
+                              execution=ExecutionConfig(fixed_ticket=.0001))
+    env = HedgingVectorEnv(4, config, risk_threshold=-.02)
     assert isinstance(env, VectorEnv)
     assert env.metadata["autoreset_mode"] == AutoresetMode.DISABLED
     assert env.single_action_space.shape == (2,) and env.action_space.shape == (4, 2)
@@ -77,7 +82,7 @@ def test_vector_reset_terminal_info_and_standard_wrapper():
     obs, reward, done, truncated, info = trace[-1]
     assert done.shape == (4,) and done.all() and not truncated.any()
     assert np.all(trace[0][1] == 0) and not trace[0][2].any()
-    np.testing.assert_allclose(reward, -.02 - np.maximum(info["terminal_loss"] - .02, 0.) / .05)
+    np.testing.assert_allclose(reward, .02 - np.maximum(info["terminal_loss"] + .02, 0.) / .10)
     assert info["_terminal_loss"].all() and info["turnover"].shape == (4, 2)
     with pytest.raises(RuntimeError, match="episode has ended"):
         env.step(actions)
@@ -101,7 +106,8 @@ def test_vector_reset_terminal_info_and_standard_wrapper():
 
 
 def test_action_buffer_reuse_cannot_rewrite_previous_holdings():
-    config = finance.common_config(n_steps=2, fixed_ticket=(.001, .001))
+    config = benchmark_config(time_grid=TimeGrid(n_steps=2),
+                              execution=ExecutionConfig(fixed_ticket=.001))
     for env in (HedgingEnv(config), HedgingVectorEnv(1, config)):
         env.reset(seed=23)
         actions = np.full(env.action_space.shape, .1, dtype=np.float32)
@@ -119,7 +125,8 @@ def test_action_buffer_reuse_cannot_rewrite_previous_holdings():
 @pytest.mark.parametrize("device", ["cpu", pytest.param("cuda", marks=pytest.mark.skipif(
     not torch.cuda.is_available(), reason="CUDA unavailable"))])
 def test_vector_tensor_path_preserves_accounting_and_gradients(device):
-    config = finance.common_config(n_steps=3, fixed_ticket=(.0001, .0001))
+    config = benchmark_config(time_grid=TimeGrid(n_steps=3),
+                              execution=ExecutionConfig(fixed_ticket=.0001))
     env = HedgingVectorEnv(4, config, device=device)
     obs, _ = env.reset_tensor(seed=751)
     assert obs.device.type == device
@@ -133,3 +140,31 @@ def test_vector_tensor_path_preserves_accounting_and_gradients(device):
     expected, = torch.autograd.grad(reference["terminal_loss"].sum(), positions)
     torch.testing.assert_close(got, expected, rtol=0, atol=0)
     env.close()
+
+
+def test_default_wrappers_use_the_benchmark_configuration():
+    config = benchmark_config()
+    for env in (HedgingEnv(), HedgingVectorEnv(2)):
+        assert env.config == config
+        observed, _ = env.reset(seed=419)
+        assert env.observation_space.contains(observed)
+        assert observed.shape[-1] == len(finance.observation_fields(config))
+        env.close()
+
+
+def test_evaluator_uses_configured_risk_and_keeps_fixed_tail_diagnostics():
+    config = benchmark_config(model="gbm", time_grid=TimeGrid(n_steps=2),
+                              risk=RiskConfig(alpha=.6))
+    bank = finance.generate_market_bank(config, 5, 1901, dtype=torch.float64)
+    def controller(observed, ledger, time_index, config):
+        return torch.zeros_like(ledger.positions)
+    metrics, tape = evaluate_controller(controller, bank, batch_size=2, zeta=-.02)
+    losses = tape["terminal_loss"].numpy()
+    assert metrics["risk_alpha"] == .6
+    # Five paths leave two complete observations in the upper 40% tail.
+    assert metrics["expected_shortfall"] == pytest.approx(np.sort(losses)[-2:].mean())
+    assert metrics["expected_shortfall"] < metrics["es95"]
+    assert metrics["ru_at_training_zeta"] == pytest.approx(
+        (-.02 + np.maximum(losses + .02, 0) / .4).mean())
+    assert metrics["es95"] == pytest.approx(losses.max())
+    assert metrics["es99"] == pytest.approx(losses.max())

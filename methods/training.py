@@ -1,9 +1,8 @@
-"""ADAPTATION: source DH/NTB pathwise training through the common tensor env.
+"""Deep Hedging/band training through the shared differentiable environment.
 
-Retains the historical global RU threshold, Adam parameter groups, independent
-minibatch RNG and gradient clipping from heston_v1/run.py. Checkpoint selection,
-hybrid score estimators, native donor stacks and research orchestration are not
-part of this small development adapter. No test bank enters training.
+Adam jointly fits the policy and a global expected-shortfall threshold, with
+separate learning rates. Training samples only its own market bank; evaluation
+and model selection stay outside this adapter.
 """
 
 from dataclasses import asdict
@@ -12,7 +11,7 @@ import time
 
 import torch
 
-from hedging_gym.finance import bank_subset, bank_to, observation_fields
+from hedging_gym.finance import bank_subset, bank_to
 from hedging_gym.gym_env import TensorHedgingEnv
 
 from .policies import DirectDHPolicy, NoTransactionBandPolicy
@@ -20,8 +19,8 @@ from .policies import DirectDHPolicy, NoTransactionBandPolicy
 
 POLICIES = {"dh": DirectDHPolicy, "ntb": NoTransactionBandPolicy}
 METHOD_LABELS = {
-    "dh": "ADAPTATION / bounded direct Deep Hedging",
-    "ntb": "ADAPTATION / learned no-transaction band, conditional pathwise training",
+    "dh": "Deep Hedging",
+    "ntb": "Learned no-transaction bands",
 }
 
 
@@ -41,12 +40,13 @@ def rollout(policy, bank, *, record_positions=False):
     rounding, penalty objective, straight-through gradient or cash equation lives
     in this adapter. Terminal loss includes the mandatory liquidation and fees.
     """
+    policy.check_config(bank.config)
     env = TensorHedgingEnv(bank)
     observed = env.reset()
     positions = []
     for _ in range(bank.config.n_steps):
-        target = policy(observed, env.state.positions, bank.config.holding_lower,
-                        bank.config.holding_upper, deterministic=True).target_holdings
+        target = policy(observed, env.state.positions, bank.config.execution.holding_lower,
+                        bank.config.execution.holding_upper, deterministic=True).target_holdings
         if record_positions:
             positions.append(target.detach().clone())
         observed, _, terminated, truncated, result = env.step(target)
@@ -62,15 +62,18 @@ def train_policy(method, train_bank, *, seed=7, updates=8, batch_size=32,
                  device="cpu", progress=True):
     """Return a trained policy and compact metadata; no model selection occurs.
 
-    ES95 uses one learned episode-global threshold, initialized once from training
-    losses. Its subsequent minibatch objective is zeta + relu(loss-zeta)/0.05.
+    The configured tail risk uses one learned episode-global threshold,
+    initialized from training losses at risk.alpha. Subsequent minibatches use
+    the shared RiskConfig.loss implementation.
     Ordinary pathwise derivatives miss moving fixed-fee/hold-gate boundary terms.
     Continuous outputs are not adapted to lot/minimum-order constraints, so those
     contracts fail explicitly before training instead of being projected.
     """
     if method not in POLICIES or updates < 1 or batch_size < 1 or len(train_bank.spot) < 1:
         raise ValueError("choose dh/ntb with positive training work and a nonempty bank")
-    if any(train_bank.config.minimum_trade + train_bank.config.trade_lot):
+    config = train_bank.config
+    if any(config.execution.vector("minimum_trade", config.n_assets)
+           + config.execution.vector("trade_lot", config.n_assets)):
         raise ValueError("continuous DH/NTB training does not support minimum-trade or lot constraints")
     if learning_rate <= 0 or zeta_learning_rate <= 0:
         raise ValueError("learning rates must be positive")
@@ -83,13 +86,12 @@ def train_policy(method, train_bank, *, seed=7, updates=8, batch_size=32,
     if progress:
         _report("train_start", method=method, label=METHOD_LABELS[method], seed=seed,
                 minibatch_seed=seed+100003, device=str(device), workers=torch.get_num_threads(),
-                config=asdict(train_bank.config), options=options,
+                config=asdict(config), options=options,
                 expected_episode_rollouts=updates*batch_size,
                 initialization_paths=min(1024, len(train_bank.spot)))
     # A separate CPU generator owns minibatch sampling, as in the source run.
     torch.manual_seed(seed)
-    policy = POLICIES[method](len(observation_fields(train_bank.config)),
-                              n_assets=train_bank.config.n_assets, hidden=hidden)
+    policy = POLICIES[method](config, hidden=hidden)
     policy = policy.to(device=device, dtype=train_bank.spot.dtype)
     train_device = bank_to(train_bank, device)
     zeta = torch.nn.Parameter(torch.zeros((), device=device, dtype=train_bank.spot.dtype))
@@ -100,7 +102,7 @@ def train_policy(method, train_bank, *, seed=7, updates=8, batch_size=32,
     index_generator = torch.Generator().manual_seed(seed+100003)
     with torch.no_grad():
         sample = bank_subset(train_device, slice(0, min(1024, len(train_device.spot))))
-        zeta.copy_(torch.quantile(rollout(policy, sample)["terminal_loss"], .95))
+        zeta.copy_(torch.quantile(rollout(policy, sample)["terminal_loss"], config.risk.alpha))
     _sync(device)
     initialization_seconds = time.perf_counter()-started
     training_start = time.perf_counter()
@@ -110,7 +112,7 @@ def train_policy(method, train_bank, *, seed=7, updates=8, batch_size=32,
         sample = bank_subset(train_device, indices.to(device))
         policy.train()
         losses = rollout(policy, sample)["terminal_loss"]
-        objective = (zeta+(losses-zeta).relu()/.05).mean()
+        objective = config.risk.loss(losses, zeta).mean()
         optimizer.zero_grad(set_to_none=True)
         objective.backward()
         torch.nn.utils.clip_grad_norm_([*policy.parameters(), zeta], 5.0, error_if_nonfinite=True)
@@ -121,14 +123,17 @@ def train_policy(method, train_bank, *, seed=7, updates=8, batch_size=32,
             record = dict(completed=update, total=updates, elapsed_seconds=elapsed,
                           updates_per_second=update/max(elapsed, 1e-12),
                           eta_seconds=elapsed*(updates-update)/update,
-                          batch_ru_es95=float(objective.detach()), zeta=float(zeta.detach()))
+                          batch_risk_loss=float(objective.detach()), risk_alpha=config.risk.alpha,
+                          zeta=float(zeta.detach()))
             history.append(record)
             if progress:
                 _report("train_progress", method=method, seed=seed, **record)
     _sync(device)
-    metadata = dict(label="DEVELOPMENT / ADAPTATION; no publication comparison", method=method,
+    metadata = dict(label="Baseline training", method=method,
                     method_label=METHOD_LABELS[method], seed=seed, minibatch_seed=seed+100003,
-                    device=str(device), options=options, config=asdict(train_bank.config),
+                    device=str(device), options=options, config=asdict(config),
+                    observation_fields=list(policy.observation_fields),
+                    instrument_names=list(policy.instrument_names),
                     zeta=float(zeta.detach()), history=history,
                     initialization_seconds=initialization_seconds,
                     training_seconds=time.perf_counter()-training_start,

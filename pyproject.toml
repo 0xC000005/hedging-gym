@@ -22,7 +22,7 @@ dev = ["pytest==9.1.1"]
 packages = ["src/hedging_gym"]
 
 [tool.hatch.build.targets.sdist]
-include = ["src", "methods", "experiments", "tests", "docs", "scripts", "README.md", "AGENTS.md", ".python-version", "pyproject.toml", "uv.lock"]
+include = ["src", "methods", "experiments", "tests", "docs", "README.md", "AGENTS.md", ".python-version", "pyproject.toml", "uv.lock"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

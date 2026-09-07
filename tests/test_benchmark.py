@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 from hedging_gym import benchmark, finance
+from hedging_gym.config import EuropeanOption, GBMConfig, PortfolioConfig, RiskConfig, TimeGrid
 
 
 def test_presets_share_observations_and_isolate_the_named_friction():
@@ -14,36 +15,64 @@ def test_presets_share_observations_and_isolate_the_named_friction():
     expected = dict(operational_fixed="fixed_ticket", operational_minimum_fee="minimum_commission",
                    operational_minimum_trade="minimum_trade", operational_lots="trade_lot")
     for name, changed_field in expected.items():
-        config = benchmark.benchmark_config(name)
+        config = benchmark.benchmark_config(name=name)
         assert finance.observation_fields(config) == fields
-        assert {key for key, value in asdict(config).items()
-                if value != asdict(basic)[key]} == {changed_field}
+        assert config.market == basic.market and config.portfolio == basic.portfolio
+        assert config.time_grid == basic.time_grid and config.risk == basic.risk
+        assert {key for key, value in asdict(config.execution).items()
+                if value != asdict(basic.execution)[key]} == {changed_field}
 
 
 def test_market_adaptation_and_execution_overlay_compose_without_cross_talk():
     for model in ("heston", "gbm", "bates"):
-        basic = benchmark.benchmark_config(model=model)
+        basic = benchmark.benchmark_config(model=model, risk=RiskConfig(alpha=.99))
         with_fee = benchmark.operational_config(basic, "operational_fixed")
         with_lots = benchmark.operational_config(with_fee, "operational_lots")
-        assert with_lots.fixed_ticket == with_fee.fixed_ticket
+        assert with_lots.execution.fixed_ticket == with_fee.execution.fixed_ticket
         assert benchmark.operational_config(with_lots) == with_lots
         changed_fields = {"v0"} if model == "gbm" else {"theta", "v0"}
         for base in (basic, with_fee, with_lots):
             (_, a), (_, b), (_, returned) = benchmark.adaptation_configs(base)
             assert a == base == returned
             assert finance.observation_fields(a) == finance.observation_fields(b)
-            assert {key for key, value in asdict(b).items()
-                    if value != asdict(a)[key]} == changed_fields
+            assert {key for key, value in asdict(b.market).items()
+                    if value != asdict(a.market)[key]} == changed_fields
+            assert b.execution == a.execution and b.portfolio == a.portfolio
+            assert b.time_grid == a.time_grid and b.risk == a.risk
         assert tuple((stage, benchmark.operational_config(config, "operational_fixed"))
                      for stage, config in benchmark.adaptation_configs(basic)) == benchmark.adaptation_configs(with_fee)
-        no_fee = benchmark.operational_config(with_lots, fixed_ticket=(0., 0.))
-        assert no_fee.fixed_ticket == (0., 0.) and no_fee.trade_lot == with_lots.trade_lot
+        no_fee = benchmark.operational_config(with_lots, fixed_ticket=0.)
+        assert no_fee.execution.fixed_ticket == 0.
+        assert no_fee.execution.trade_lot == with_lots.execution.trade_lot
     with pytest.raises(ValueError, match="stochastic-core"):
         benchmark.adaptation_configs(market_changes={"fixed_ticket": (.01, .01)})
     with pytest.raises(ValueError, match="stochastic-core"):
         benchmark.adaptation_configs(market_changes={"model": "gbm"})
+    with pytest.raises(ValueError, match="stochastic-core"):
+        benchmark.adaptation_configs(market_changes={"spot0": 2.})
     with pytest.raises(ValueError, match="fees and trading constraints"):
         benchmark.operational_config(basic, v0=.09)
+
+
+def test_benchmark_defaults_follow_the_market_calendar_and_selected_book():
+    grid = TimeGrid(n_steps=90, days_per_year=365)
+    market = GBMConfig(spot0=100.)
+    default = benchmark.benchmark_config(model=market, time_grid=grid)
+    assert default.market is market and default.time_grid is grid
+    assert default.portfolio.liability == EuropeanOption(100., grid.horizon)
+    assert default.portfolio.hedges == (EuropeanOption(100., 2*grid.horizon),)
+    for hedges in ((), (EuropeanOption(90., 2*grid.horizon, "put"),
+                        EuropeanOption(100., 2*grid.horizon),
+                        EuropeanOption(110., 3*grid.horizon))):
+        book = PortfolioConfig(default.portfolio.liability, hedges)
+        config = benchmark.benchmark_config(model=market, time_grid=grid, portfolio=book)
+        assert config.portfolio is book
+        assert config.execution.vector("proportional", config.n_assets) == (.0005,) + (.01,) * len(hedges)
+        fixed = benchmark.operational_config(config, "operational_fixed")
+        assert fixed.execution.vector("fixed_ticket", config.n_assets) == (.0001,) * config.n_assets
+        lots = benchmark.operational_config(fixed, "operational_lots")
+        assert lots.execution.vector("trade_lot", config.n_assets) == (.001,) + (.1,) * len(hedges)
+        assert finance.observation_fields(lots) == finance.observation_fields(config)
 
 
 def test_chronology_uses_fresh_eval_paths_and_persistent_update_state(monkeypatch):

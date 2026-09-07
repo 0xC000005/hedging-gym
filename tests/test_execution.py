@@ -6,19 +6,19 @@ import numpy as np
 import pytest
 import torch
 
-from hedging_gym import finance
+from hedging_gym import finance, benchmark_config, TimeGrid, ExecutionConfig
 from hedging_gym.evaluation import empirical_es, evaluate_controller
 from hedging_gym.gym_env import HedgingEnv, HedgingVectorEnv, TensorHedgingEnv
 
 
 def execution_config():
-    return finance.common_config(n_steps=3, minimum_trade=(.5, .5),
-        trade_lot=(.25, .25), minimum_commission=(.003, .004))
+    return benchmark_config(time_grid=TimeGrid(n_steps=3), execution=ExecutionConfig(
+        minimum_trade=.5, trade_lot=.25, minimum_commission=(.003, .004)))
 
 
 def test_commission_is_a_floor_and_keeps_smooth_cost_gradients():
-    config = finance.common_config(minimum_commission=(.01, .02), proportional=(.1, .1),
-                                  quadratic=(.2, .3), fixed_ticket=(.001, .002))
+    config = benchmark_config(execution=ExecutionConfig(minimum_commission=(.01, .02),
+        proportional=.1, quadratic=(.2, .3), fixed_ticket=(.001, .002)))
     trade = torch.tensor([[0., 0.], [.01, -.02], [.5, -.5]], dtype=torch.float64, requires_grad=True)
     costs = finance.transaction_cost(trade, torch.ones_like(trade), config)
     np.testing.assert_allclose(costs.detach(), [0., .03314, .228], atol=1e-15)
@@ -27,8 +27,8 @@ def test_commission_is_a_floor_and_keeps_smooth_cost_gradients():
 
 
 def test_minimum_and_lots_apply_to_increments_with_mandatory_closeout():
-    config = finance.common_config(n_steps=2, minimum_trade=(.3, .3), trade_lot=(.1, .1),
-                                   minimum_commission=(.001, .001))
+    config = benchmark_config(time_grid=TimeGrid(n_steps=2), execution=ExecutionConfig(
+        minimum_trade=.3, trade_lot=.1, minimum_commission=.001))
     bank = finance.generate_market_bank(config, 2, 409)
     half = torch.full((2, 2), .5)
     state = finance.trade_step(finance.initial_state(bank), half, bank.marks[:, 0], config)
@@ -43,13 +43,13 @@ def test_minimum_and_lots_apply_to_increments_with_mandatory_closeout():
     torch.testing.assert_close(final["liquidation_cost"],
                                finance.transaction_cost(-remaining, bank.marks[:, -1], config))
     assert (final["tickets"] == 6).all()
-    lot_only = replace(config, minimum_trade=(0., 0.))
+    lot_only = replace(config, execution=replace(config.execution, minimum_trade=0.))
     assert not finance.feasible_targets(torch.zeros_like(half), torch.full_like(half, 1e-10), lot_only).any()
 
 
 def test_tensor_masks_match_execution_and_rejection_preserves_state():
     env = TensorHedgingEnv(finance.generate_market_bank(execution_config(), 2, 193))
-    assert env.reset().shape == (2, 35)
+    assert env.reset().shape == (2, len(finance.observation_fields(env.config)))
     candidates = torch.tensor([[0., 0.], [.5, .5], [.25, .5], [.6, .5], [3., .5], [float("nan"), 0.]])
     torch.testing.assert_close(env.action_mask(candidates),
         torch.tensor([[True, True, False, False, False, False]] * 2))
@@ -62,7 +62,7 @@ def test_tensor_masks_match_execution_and_rejection_preserves_state():
     assert env.time_index == 1
     torch.testing.assert_close(env.state.positions, entry, rtol=0, atol=0)
     lots = TensorHedgingEnv(finance.generate_market_bank(
-        finance.common_config(n_steps=3, trade_lot=(.1, .1)), 2, 193))
+        benchmark_config(time_grid=TimeGrid(n_steps=3), execution=ExecutionConfig(trade_lot=.1)), 2, 193))
     lots.reset()
     lots.step(torch.full((2, 2), .1))
     mixed = torch.full((2, 2), .2, dtype=torch.float64, requires_grad=True)

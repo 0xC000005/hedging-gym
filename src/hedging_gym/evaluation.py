@@ -24,11 +24,10 @@ def empirical_es(values: torch.Tensor, alpha: float) -> float:
 
 @torch.no_grad()
 def evaluate_controller(controller, bank, *, device=None, batch_size=1024, mode_seed=30001,
-                        label="ADAPTATION / FROZEN CONTROLLER EVALUATION", zeta=None, progress=False):
+                        label="Controller evaluation", zeta=None, progress=False):
     """Run complete shared tensor episodes; ES is computed after pooling paths.
 
-    The CPU tape schema matches run.evaluate/check_accounting. Batch size and
-    order are part of the sampled-policy RNG contract, as in native evaluation.
+    Trade tapes retain the executed quantities. Batch size and order are part of the sampled-policy RNG contract, as in native evaluation.
     Timing includes transfers, controller calls, ledger execution and tapes;
     bank generation/training are external costs and are not silently zeroed.
     """
@@ -82,17 +81,21 @@ def evaluate_controller(controller, bank, *, device=None, batch_size=1024, mode_
         raise FloatingPointError("nonfinite controller terminal losses")
     if device.type == "cuda":
         torch.cuda.synchronize(device)
+    alpha = bank.config.risk.alpha
     metrics = dict(label=label, paths=len(loss), mean_loss=float(loss.double().mean()),
+        risk_alpha=alpha, expected_shortfall=empirical_es(loss, alpha),
         es95=empirical_es(loss, .95), es99=empirical_es(loss, .99),
         transaction_cost_mean=float(raw["transaction_cost"].double().mean()),
         turnover_mean_by_asset=raw["turnover"].double().mean(0).tolist(),
         turnover_mean_total=float(raw["turnover"].double().sum(-1).mean()), tickets_mean=float(raw["tickets"].double().mean()),
         constraint_violations=int(raw["constraint_violations"].sum()), mode_seed=mode_seed, evaluation_batch_size=batch_size,
         action_selection=getattr(controller, "action_selection", "caller_defined"),
+        effective_tail_paths=(1-alpha)*len(loss),
         effective_tail_paths95=.05*len(loss), effective_tail_paths99=.01*len(loss),
         evaluation_seconds=time.perf_counter()-started, device=str(device),
         timing_scope="Whole frozen evaluation: transfers, decisions, tensor ledger and CPU tapes; excludes bank generation/training")
     if zeta is not None:
-        threshold = float(torch.as_tensor(zeta).detach().cpu())
-        metrics.update(zeta=threshold, ru_es95_at_training_zeta=float((threshold+(loss.double()-threshold).relu()/.05).mean()))
+        threshold = float(zeta.detach().cpu()) if isinstance(zeta, torch.Tensor) else float(zeta)
+        metrics.update(zeta=threshold,
+            ru_at_training_zeta=float(bank.config.risk.loss(loss.double(), threshold).mean()))
     return metrics, raw

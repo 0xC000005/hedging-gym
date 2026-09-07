@@ -15,7 +15,7 @@ from gymnasium.vector import AutoresetMode, VectorEnv
 from gymnasium.vector.utils import batch_space
 
 from .finance import (
-    MarketBank, common_config, generate_market_bank, initial_state, liquidate,
+    MarketBank, generate_market_bank, initial_state, liquidate,
     observation, observation_fields, trade_step, feasible_targets,
 )
 
@@ -29,7 +29,7 @@ class TensorHedgingEnv:
     is shared by masks and execution, never lot rounding or action projection.
     Tensor actions preserve gradients through all cash/holding transitions.
     Reward is zero until settlement, then cost-inclusive terminal P&L. To train
-    ES95, apply the global Rockafellar--Uryasev loss to the episode batch,
+    expected shortfall, apply the global Rockafellar--Uryasev loss to the episode batch,
     not a new conditional CVaR objective at every date.
     """
 
@@ -66,11 +66,6 @@ class TensorHedgingEnv:
                 or target_holdings.device != self.state.positions.device):
             raise ValueError("actions must be [batch,n_assets] tensors on the environment device")
         target_holdings = target_holdings.to(dtype=self.state.positions.dtype)
-        # New-suite execution is checked by trade_step; legacy configs still
-        # need boundary validation here. Do not synchronize the GPU twice.
-        if not self.config.execution_features and not bool(feasible_targets(
-                self.state.positions, target_holdings, self.config).all()):
-            raise ValueError("actions must be finite bounded targets satisfying minimum-trade and lot rules")
         # Own the executed holdings: generic RL callers often reuse an action
         # buffer in place. Cloning preserves gradients but prevents that buffer
         # from rewriting yesterday's holdings without a cash movement.
@@ -91,7 +86,7 @@ class TensorHedgingEnv:
         return observation(self._bank, self.time_index, self.state), reward, terminated, False, info
 
 
-class HestonHedgingVectorEnv(VectorEnv):
+class HedgingVectorEnv(VectorEnv):
     """One batched simulation, not a Python loop over single-path environments.
 
     ``reset``/``step`` implement Gymnasium's NumPy VectorEnv API. Torch learners
@@ -108,8 +103,9 @@ class HestonHedgingVectorEnv(VectorEnv):
 
     Reset includes selected-model path generation and option pricing. Step only
     exposes the current date and executes the shared ledger. Default terminal
-    reward is P&L; optional risk_threshold gives negative global RU loss at .95,
-    not per-step CVaR. The threshold is fitted by the learner, never the env.
+    reward is P&L; optional risk_threshold gives negative global RU loss at the
+    configured risk confidence, not per-step CVaR. The threshold is fitted by
+    the learner, never the env.
     simulation_substeps refines internal integration, not the trading calendar.
     """
 
@@ -120,7 +116,8 @@ class HestonHedgingVectorEnv(VectorEnv):
         if not isinstance(num_envs, int) or num_envs < 1:
             raise ValueError("num_envs must be a positive integer")
         self.num_envs = num_envs
-        self.config = config or common_config()
+        from .benchmark import benchmark_config
+        self.config = benchmark_config() if config is None else config
         self.device = torch.device(device)
         self.risk_threshold = risk_threshold
         self.price_chunk_size = price_chunk_size
@@ -128,8 +125,8 @@ class HestonHedgingVectorEnv(VectorEnv):
             raise ValueError("simulation_substeps must be a positive integer")
         self.simulation_substeps = simulation_substeps
         self.single_action_space = gym.spaces.Box(
-            np.asarray(self.config.holding_lower, dtype=np.float32),
-            np.asarray(self.config.holding_upper, dtype=np.float32))
+            np.asarray(self.config.execution.vector("holding_lower", self.config.n_assets), dtype=np.float32),
+            np.asarray(self.config.execution.vector("holding_upper", self.config.n_assets), dtype=np.float32))
         self.single_observation_space = gym.spaces.Box(
             -np.inf, np.inf, (len(observation_fields(self.config)),), np.float32)
         self.action_space = batch_space(self.single_action_space, num_envs)
@@ -160,7 +157,7 @@ class HestonHedgingVectorEnv(VectorEnv):
             raise ValueError("actions must be [num_envs,n_assets] target holdings")
         obs, reward, terminated, truncated, info = self._tensor_env.step(actions)
         if terminated and self.risk_threshold is not None:
-            reward = -self.risk_threshold - (info["terminal_loss"] - self.risk_threshold).relu() / .05
+            reward = -self.config.risk.loss(info["terminal_loss"], self.risk_threshold)
         return (obs, reward,
                 torch.full((self.num_envs,), terminated, dtype=torch.bool, device=self.device),
                 torch.full((self.num_envs,), truncated, dtype=torch.bool, device=self.device), info)
@@ -192,26 +189,28 @@ class HestonHedgingVectorEnv(VectorEnv):
         self._tensor_env = None
 
 
-class HestonHedgingEnv(gym.Env):
+class HedgingEnv(gym.Env):
     """Single-path standard Gymnasium API with reproducible fresh market paths.
 
     Defaults to the basic common benchmark. The NumPy API is convenient for
     generic RL packages, not the accelerated path for direct-gradient methods.
-    A fixed risk_threshold optionally returns terminal negative RU loss at
-    alpha=.95. Fitting that one global threshold remains the learner's job.
+    A fixed risk_threshold optionally returns terminal negative RU loss at the
+    configured risk confidence. Fitting the global threshold remains the learner's job.
     simulation_substeps refines integration while preserving all trading dates.
     """
 
     metadata = {"render_modes": []}
 
     def __init__(self, config=None, *, risk_threshold=None, simulation_substeps=1):
-        self.config = config or common_config()
+        from .benchmark import benchmark_config
+        self.config = benchmark_config() if config is None else config
         self.risk_threshold = risk_threshold
         if not isinstance(simulation_substeps, int) or simulation_substeps < 1:
             raise ValueError("simulation_substeps must be a positive integer")
         self.simulation_substeps = simulation_substeps
-        self.action_space = gym.spaces.Box(np.asarray(self.config.holding_lower, dtype=np.float32),
-                                          np.asarray(self.config.holding_upper, dtype=np.float32))
+        self.action_space = gym.spaces.Box(
+            np.asarray(self.config.execution.vector("holding_lower", self.config.n_assets), dtype=np.float32),
+            np.asarray(self.config.execution.vector("holding_upper", self.config.n_assets), dtype=np.float32))
         self.observation_space = gym.spaces.Box(-np.inf, np.inf,
                                                (len(observation_fields(self.config)),), np.float32)
         self._tensor_env = None
@@ -230,11 +229,10 @@ class HestonHedgingEnv(gym.Env):
         if self._tensor_env is None:
             raise RuntimeError("reset before stepping")
         obs, reward, terminated, truncated, info = self._tensor_env.step(torch.from_numpy(action)[None])
-        info = {key: value[0].detach().numpy() for key, value in info.items()}
-        reward = float(reward[0])
         if terminated and self.risk_threshold is not None:
-            loss = float(info["terminal_loss"])
-            reward = -self.risk_threshold - max(loss - self.risk_threshold, 0.) / .05
+            reward = -self.config.risk.loss(info["terminal_loss"], self.risk_threshold)
+        info = {key: value[0].detach().numpy() for key, value in info.items()}
+        reward = float(reward[0].detach())
         return obs[0].detach().numpy(), reward, terminated, truncated, info
 
     def action_mask(self, candidate_targets):
@@ -245,8 +243,3 @@ class HestonHedgingEnv(gym.Env):
         if candidates.ndim != 2:
             raise ValueError("candidate targets must be [K,n_assets]")
         return self._tensor_env.action_mask(candidates)[0].detach().numpy()
-
-
-# Generic names for new market backends; historical Heston names are retained.
-HedgingEnv = HestonHedgingEnv
-HedgingVectorEnv = HestonHedgingVectorEnv

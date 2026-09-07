@@ -1,179 +1,29 @@
-"""ADAPTATION: batched market backends and one differentiable cash ledger.
+"""Batched market prices and paths with one differentiable portfolio cash ledger.
 
-The characteristic function and 48-node Gauss--Legendre panels come from
-``finance_first_v1.benchmark``; the transition is the PFHedge-style Andersen
-quadratic-exponential/log-spot scheme in ``gpc_transfer_v1.finance.heston_qem``.
-The latter is a time discretization, not an exact Heston transition. In
-particular its legacy name does not establish exact martingale correction.
-Heston remains the historical default. GBM and Bates share the same book;
-their pricing/transition implementations have separate QuantLib references.
-The cash ledger currently requires r=q=0.
-
-There are 30 trading intervals of 1/252 year, decisions at 0,...,29, and
-liability settlement at 30/252. The common benchmark uses one hedge call at
-60/252; low-level config defaults retain the historical two-call book at
-60/252 and 90/252. Hedge calls are sold at their selected-model marks at
-settlement. Every nonzero instrument
-trade, including liquidation, pays its actual fixed ticket. A ticket's hard
-activation has no pathwise gradient; discrete estimators belong to the policy.
+Heston uses a quadratic-exponential variance step and an approximate log-spot
+step (not an exact martingale correction). GBM is exact at trading dates; Bates
+adds compensated independent jumps. Independent references live in tests.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from functools import lru_cache
 import math
 
 import numpy as np
 import torch
 
-EXECUTION_FIELDS = ("proportional", "quadratic", "fixed_ticket", "minimum_commission",
-                    "minimum_trade", "trade_lot", "holding_lower", "holding_upper")
-
+from .config import (
+    HedgingConfig, HestonConfig, TimeGrid, EXECUTION_FIELDS,
+)
 
 @lru_cache(maxsize=None)
 def _quadrature(order: int = 48) -> tuple[np.ndarray, np.ndarray]:
-    """Retained Fourier quadrature, now independent of the historical experiment."""
+    """Gauss--Legendre quadrature on one Fourier integration panel."""
     nodes, weights = np.polynomial.legendre.leggauss(order)
     upper = 150.0
     return (nodes + 1.0) * upper / 2.0, weights * upper / 2.0
-
-
-@dataclass(frozen=True)
-class HedgeBookConfig:
-    """Instrument, calendar and execution contract shared by market models."""
-    n_steps: int = 30
-    dt: float = 1.0 / 252.0
-    spot0: float = 1.0
-    v0: float = 0.04
-    r: float = 0.0
-    q: float = 0.0
-    liability_strike: float = 1.0
-    hedge_strikes: tuple[float, ...] = (0.95, 1.05)
-    hedge_maturities: tuple[float, ...] = (60.0 / 252.0, 90.0 / 252.0)
-    holding_lower: tuple[float, ...] = (-1.0, -1.0, -1.0)
-    holding_upper: tuple[float, ...] = (2.0, 1.0, 1.0)
-    proportional: tuple[float, ...] = (0.0005, 0.01, 0.01)
-    quadratic: tuple[float, ...] = (0.0, 0.0, 0.0)
-    fixed_ticket: tuple[float, ...] = (0.0, 0.0, 0.0)
-    minimum_commission: tuple[float, ...] | None = None
-    minimum_trade: tuple[float, ...] | None = None
-    trade_lot: tuple[float, ...] | None = None
-    execution_features: bool = False
-
-    @property
-    def n_assets(self):
-        return 1 + len(self.hedge_strikes)
-
-    def __post_init__(self):
-        for name in ("hedge_strikes", "hedge_maturities", "holding_lower", "holding_upper",
-                     "proportional", "quadratic", "fixed_ticket"):
-            object.__setattr__(self, name, tuple(getattr(self, name)))
-        for name in ("minimum_commission", "minimum_trade", "trade_lot"):
-            values = getattr(self, name)
-            object.__setattr__(self, name, (0.0,) * self.n_assets if values is None else tuple(values))
-        # Legacy checkpoints keep their input shape. New execution rules may not
-        # be hidden from a controller; benchmark presets expose even zero rules.
-        if any(self.minimum_commission + self.minimum_trade + self.trade_lot):
-            object.__setattr__(self, "execution_features", True)
-        if not all(math.isfinite(x) for x in (self.dt, self.spot0, self.v0,
-                                              self.liability_strike, *self.hedge_strikes,
-                                              *self.hedge_maturities)):
-            raise ValueError("initial state and contract terms must be finite")
-        if self.r != 0.0 or self.q != 0.0:
-            raise ValueError("the shared cash ledger currently implements r=q=0")
-        if self.n_steps < 1 or self.dt <= 0 or self.spot0 <= 0 or self.v0 < 0:
-            raise ValueError("invalid horizon or initial market state")
-        if not self.hedge_strikes or len(self.hedge_strikes) != len(self.hedge_maturities):
-            raise ValueError("each hedge call needs a strike and maturity")
-        if min(self.hedge_strikes + (self.liability_strike,)) <= 0:
-            raise ValueError("strikes must be positive")
-        if min(self.hedge_maturities) <= self.n_steps * self.dt:
-            raise ValueError("hedge calls must outlive the liability")
-        for name in EXECUTION_FIELDS:
-            values = getattr(self, name)
-            if len(values) != self.n_assets or not all(math.isfinite(x) for x in values):
-                raise ValueError("bounds and costs need one finite value per instrument")
-        if any(lo > 0 or hi < 0 or lo >= hi for lo, hi in
-               zip(self.holding_lower, self.holding_upper)):
-            raise ValueError("holding bounds must contain the zero initial portfolio")
-        if min(self.proportional + self.quadratic + self.fixed_ticket
-               + self.minimum_commission + self.minimum_trade + self.trade_lot) < 0:
-            raise ValueError("trading costs and execution limits must be nonnegative")
-
-
-@dataclass(frozen=True)
-class HestonConfig(HedgeBookConfig):
-    kappa: float = 3.0
-    theta: float = 0.04
-    sigma: float = 0.3
-    rho: float = -0.5
-    model: str = "heston"
-
-    def __post_init__(self):
-        super().__post_init__()
-        if (self.model not in ("heston", "bates") or not all(math.isfinite(x) for x in
-                (self.kappa, self.theta, self.sigma, self.rho))
-                or min(self.kappa, self.theta, self.sigma) <= 0 or not -1 <= self.rho <= 1):
-            raise ValueError("invalid Heston coefficients")
-
-
-@dataclass(frozen=True)
-class GBMConfig(HedgeBookConfig):
-    """Constant variance v0; mu is physical drift, not the pricing drift."""
-    mu: float = 0.0
-    model: str = "gbm"
-
-    def __post_init__(self):
-        super().__post_init__()
-        if self.model != "gbm" or not math.isfinite(self.mu) or self.v0 <= 0:
-            raise ValueError("GBM requires finite drift and positive variance")
-
-
-@dataclass(frozen=True)
-class BatesConfig(HestonConfig):
-    """Heston plus independent compensated compound-Poisson stock jumps.
-
-    Jump log sizes are normal(jump_mean,jump_std squared). These initial
-    development coefficients are explicit, not calibrated market evidence.
-    """
-    jump_intensity: float = 1.0
-    jump_mean: float = -0.1
-    jump_std: float = 0.2
-    model: str = "bates"
-
-    def __post_init__(self):
-        super().__post_init__()
-        if (self.model != "bates" or not all(math.isfinite(x) for x in
-                (self.jump_intensity, self.jump_mean, self.jump_std))
-                or min(self.jump_intensity, self.jump_std) < 0):
-            raise ValueError("invalid Bates jump coefficients")
-
-
-def config_from_dict(values):
-    """Load named models while preserving historical Heston checkpoint configs."""
-    model = values.get("model", "heston")
-    if model == "heston":
-        return HestonConfig(**values)
-    if model == "gbm":
-        return GBMConfig(**values)
-    if model == "bates":
-        return BatesConfig(**values)
-    raise ValueError(f"unknown market model: {model}")
-
-
-def common_config(*, model="heston", **changes):
-    """Approved simple benchmark: stock, one ATM 60-day call and cash.
-
-    HestonConfig() retains the historical two-call book for old results.
-    Keyword changes define disclosed development cost/market configurations.
-    """
-    values = dict(hedge_strikes=(1.0,), hedge_maturities=(60.0 / 252.0,),
-                  holding_lower=(-1.0, -1.0), holding_upper=(2.0, 1.0),
-                  proportional=(0.0005, 0.01), quadratic=(0.0, 0.0),
-                  fixed_ticket=(0.0, 0.0))
-    values.update(changes)
-    return config_from_dict(dict(values, model=model))
 
 
 @dataclass
@@ -181,8 +31,8 @@ class MarketBank:
     spot: torch.Tensor                 # [paths, n_steps + 1]
     variance: torch.Tensor
     marks: torch.Tensor                # [paths, n_steps + 1, n_assets]
-    liability: torch.Tensor            # positive value of one owed call
-    config: HedgeBookConfig
+    liability: torch.Tensor            # signed value of configured liability
+    config: HedgingConfig
 
 
 BANK_FIELDS = ("spot", "variance", "marks", "liability")
@@ -229,10 +79,10 @@ def _characteristic(u, log_spot, variance, maturity, c):
 def heston_call_price(spot, variance, maturity, strike, config: HestonConfig):
     """Heston/Bates Fourier price; all quadrature runs in float64.
 
-    Reuse the legacy 48-node [0,150] panel and append panels for short or
+    Use a 48-node [0,150] panel and append panels for short or
     low-variance states. Positive-intensity Bates uses 96 nodes per panel:
     large jumps create far-moneyness oscillations unresolved by 48 nodes.
-    A sole legacy panel has material one-day errors.
+    A sole panel has material one-day errors.
     The cutoff is at least 12 / sqrt(E[integrated variance]); it is a numerical
     rule qualified by independent QuantLib checks, not a universal error bound.
     This function preserves gradients with respect to tensor inputs. Price-bank
@@ -282,24 +132,28 @@ def heston_call_price(spot, variance, maturity, strike, config: HestonConfig):
     return result.reshape(shape).to(result_dtype)
 
 
-def quantlib_call_price(spot, variance, maturity, strike, config):
-    """Independent QuantLib pricing reference on the exact 1/252-year grid.
+def quantlib_option_price(spot, variance, maturity, strike, config, *, days_per_year=252, kind="call"):
+    """Independent call/put reference on the selected 252/365/360 year clock.
 
-    NullCalendar counts every artificial trading date under Business252.
-    Reject off-grid times rather than silently rounding the financial horizon.
+    Contract times must map exactly to dates under that clock; no silent
+    maturity rounding is used. Flat zero-rate curves match the shared ledger.
     """
     import QuantLib as ql
 
+    if kind not in ("call", "put"):
+        raise ValueError("choose call or put")
+    clock = TimeGrid(days_per_year=days_per_year)
     if maturity == 0:
-        return max(float(spot) - float(strike), 0.0)
-    days = round(float(maturity) * 252)
-    if days < 1 or not math.isclose(days / 252, float(maturity), abs_tol=1e-12):
-        raise ValueError("QuantLib oracle requires exact positive n/252 maturity")
+        return max((1 if kind == "call" else -1) * (float(spot) - float(strike)), 0.0)
+    days = round(float(maturity) * clock.days_per_year)
+    if days < 1 or not math.isclose(days * clock.dt, float(maturity), rel_tol=0, abs_tol=1e-12):
+        raise ValueError("QuantLib reference requires maturities on the selected year clock")
     evaluation = ql.Date(2, ql.January, 2024)
     previous_evaluation = ql.Settings.instance().evaluationDate
     try:
         ql.Settings.instance().evaluationDate = evaluation
-        day_count = ql.Business252(ql.NullCalendar())
+        day_count = {252: lambda: ql.Business252(ql.NullCalendar()),
+                     365: ql.Actual365Fixed, 360: ql.Actual360}[days_per_year]()
         curve = ql.YieldTermStructureHandle(ql.FlatForward(evaluation, 0.0, day_count))
         quote = ql.QuoteHandle(ql.SimpleQuote(float(spot)))
         if config.model == "gbm":
@@ -317,7 +171,7 @@ def quantlib_call_price(spot, variance, maturity, strike, config):
                                        config.theta, config.sigma, config.rho)
             engine = ql.AnalyticHestonEngine(ql.HestonModel(process), 1e-10, 10000)
         option = ql.VanillaOption(
-            ql.PlainVanillaPayoff(ql.Option.Call, float(strike)),
+            ql.PlainVanillaPayoff(ql.Option.Call if kind == "call" else ql.Option.Put, float(strike)),
             ql.EuropeanExercise(evaluation + days),
         )
         option.setPricingEngine(engine)
@@ -325,8 +179,6 @@ def quantlib_call_price(spot, variance, maturity, strike, config):
     finally:
         ql.Settings.instance().evaluationDate = previous_evaluation
 
-
-quantlib_heston_call_price = quantlib_call_price  # historical import compatibility
 
 
 def call_price(spot, variance, maturity, strike, config):
@@ -337,19 +189,19 @@ def call_price(spot, variance, maturity, strike, config):
     return heston_call_price(spot, variance, maturity, strike, config)
 
 
-def transition(spot, variance, shocks=None, config=None, *, generator=None):
+def transition(spot, variance, shocks=None, config=None, *, dt, generator=None):
     """Shared conditional market interface; trading/accounting are separate."""
     config = config or HestonConfig()
     if config.model == "gbm":
         from .gbm import gbm_transition
-        return gbm_transition(spot, variance, shocks, config, generator=generator)
+        return gbm_transition(spot, variance, shocks, config, dt=dt, generator=generator)
     if config.model == "bates":
         from .bates import bates_transition
-        return bates_transition(spot, variance, shocks, config, generator=generator)
-    return heston_transition(spot, variance, shocks, config, generator=generator)
+        return bates_transition(spot, variance, shocks, config, dt=dt, generator=generator)
+    return heston_transition(spot, variance, shocks, config, dt=dt, generator=generator)
 
 
-def market_shocks(config, rng, count=None):
+def market_shocks(config, rng, count=None, *, dt):
     """Seeded NumPy chance draws for scalar/batched search, never future paths.
 
     Heston's three-channel draw order is unchanged. Bates appends an actual
@@ -358,12 +210,12 @@ def market_shocks(config, rng, count=None):
     """
     columns = [rng.normal(size=count), rng.random(size=count), rng.normal(size=count)]
     if config.model == "bates":
-        columns.extend((rng.poisson(config.jump_intensity * config.dt, size=count),
+        columns.extend((rng.poisson(config.jump_intensity * dt, size=count),
                         rng.normal(size=count)))
     return np.stack(columns, axis=-1)
 
 
-def heston_transition(spot, variance, shocks=None, config: HestonConfig | None = None, *, generator=None):
+def heston_transition(spot, variance, shocks=None, config: HestonConfig | None = None, *, dt, generator=None):
     """One action-independent step; shocks[..., :] are normalV, uniformV, normalS.
 
     Explicit shocks permit common random numbers and independent NumPy parity.
@@ -377,7 +229,7 @@ def heston_transition(spot, variance, shocks=None, config: HestonConfig | None =
         zs = torch.randn(spot.shape, device=spot.device, dtype=spot.dtype, generator=generator)
     else:
         zv, uv, zs = shocks.unbind(-1)
-    decay = math.exp(-config.kappa * config.dt)
+    decay = math.exp(-config.kappa * dt)
     mean = config.theta + (variance - config.theta) * decay
     variance_of_variance = (
         variance * config.sigma**2 * decay * (1 - decay) / config.kappa
@@ -393,32 +245,50 @@ def heston_transition(spot, variance, shocks=None, config: HestonConfig | None =
     exponential = torch.log((1 - probability_zero) / (1 - uv).clamp_min(epsilon)) / beta
     point_mass = torch.where(uv > probability_zero, exponential, torch.zeros_like(exponential))
     next_variance = torch.where(psi <= 1.5, quadratic, point_mass)
-    common = 0.5 * config.dt * (config.kappa * config.rho / config.sigma - 0.5)
-    k0 = -config.rho * config.kappa * config.theta * config.dt / config.sigma
+    common = 0.5 * dt * (config.kappa * config.rho / config.sigma - 0.5)
+    k0 = -config.rho * config.kappa * config.theta * dt / config.sigma
     k1, k2 = common - config.rho / config.sigma, common + config.rho / config.sigma
-    noise_variance = 0.5 * config.dt * (1 - config.rho**2) * (variance + next_variance)
+    noise_variance = 0.5 * dt * (1 - config.rho**2) * (variance + next_variance)
     next_spot = spot * torch.exp(k0 + k1 * variance + k2 * next_variance
                                 + noise_variance.clamp_min(0).sqrt() * zs)
     return next_spot, next_variance
 
 
-def mark_state(spot, variance, time_index, config: HestonConfig):
-    """Current stock/call marks and positive liability value; no future inputs."""
+def option_price(spot, variance, maturity, strike, market, *, kind="call"):
+    """Price a European call or put; r=q=0 put-call parity preserves gradients."""
+    if kind not in ("call", "put"):
+        raise ValueError("choose call or put")
+    call = call_price(spot, variance, maturity, strike, market)
+    return call if kind == "call" else (call - _tensor(spot, call) + _tensor(strike, call)).clamp_min(0)
+
+
+def mark_state(spot, variance, time_index, config: HedgingConfig):
+    """Current marks and signed liability value, independent of trading rules."""
     reference = spot.to(torch.float64)
-    time = _tensor(time_index, reference) * config.dt
-    hedge_time = _tensor(config.hedge_maturities, reference) - time[..., None]
-    hedge_calls = call_price(reference[..., None], variance[..., None], hedge_time,
-                                   config.hedge_strikes, config)
-    liability_time = (config.n_steps * config.dt - time).clamp_min(0)
-    liability = call_price(reference, variance, liability_time, config.liability_strike, config)
-    return torch.cat((spot[..., None], hedge_calls.to(spot.dtype)), dim=-1), liability.to(spot.dtype)
-
-
-marks_at = mark_state
+    date_index = _tensor(time_index, reference)
+    contracts = config.portfolio.hedges
+    if contracts:
+        strikes = _tensor([option.strike for option in contracts], reference)
+        # Contract dates are validated on the selected clock. Subtract dates
+        # before converting to years so expiry is exactly zero, not a tiny
+        # positive maturity that would trigger needless Fourier refinement.
+        expiry_dates = [round(option.maturity * config.time_grid.days_per_year) for option in contracts]
+        maturity = (_tensor(expiry_dates, reference) - date_index[..., None]) * config.dt
+        calls = call_price(reference[..., None], variance[..., None], maturity, strikes, config.market)
+        puts = (calls - reference[..., None] + strikes).clamp_min(0)
+        is_put = torch.tensor([option.kind == "put" for option in contracts], device=spot.device)
+        prices = torch.where(is_put, puts, calls).to(spot.dtype)
+        marks = torch.cat((spot[..., None], prices), dim=-1)
+    else:
+        marks = spot[..., None]
+    liability = config.portfolio.liability
+    value = option_price(reference, variance, ((config.n_steps - date_index) * config.dt).clamp_min(0),
+                         liability.strike, config.market, kind=liability.kind)
+    return marks, (config.portfolio.liability_quantity * value).to(spot.dtype)
 
 
 @torch.no_grad()
-def simulate_market_paths(config, n_paths: int, seed: int, *, device="cpu",
+def simulate_market_paths(market, time_grid: TimeGrid, n_paths: int, seed: int, *, device="cpu",
                           dtype=torch.float64, substeps=1):
     """Simulate at finer internal steps, returning only unchanged trading dates.
 
@@ -429,13 +299,13 @@ def simulate_market_paths(config, n_paths: int, seed: int, *, device="cpu",
     if n_paths < 1 or not isinstance(substeps, int) or substeps < 1:
         raise ValueError("positive path count and integer simulation substeps required")
     generator = torch.Generator(device=device).manual_seed(seed)
-    spot = torch.full((n_paths,), config.spot0, device=device, dtype=torch.float64)
-    variance = torch.full_like(spot, config.v0)
-    internal = replace(config, dt=config.dt / substeps) if substeps != 1 else config
+    spot = torch.full((n_paths,), market.spot0, device=device, dtype=torch.float64)
+    variance = torch.full_like(spot, market.v0)
+    internal_dt = time_grid.dt / substeps
     spots, variances = [spot], [variance]
-    for _ in range(config.n_steps):
+    for _ in range(time_grid.n_steps):
         for _ in range(substeps):
-            spot, variance = transition(spot, variance, config=internal, generator=generator)
+            spot, variance = transition(spot, variance, config=market, dt=internal_dt, generator=generator)
         spots.append(spot)
         variances.append(variance)
     spot, variance = torch.stack(spots, dim=1), torch.stack(variances, dim=1)
@@ -469,14 +339,16 @@ def market_bank_from_paths(config, spot, variance, *, price_chunk_size=1024, dty
 def generate_market_bank(config, n_paths: int, seed: int, *, device="cpu", dtype=torch.float32,
                          price_chunk_size=1024, substeps=1):
     """Batched market paths and option marks; internal refinement preserves trading dates."""
-    spot, variance = simulate_market_paths(config, n_paths, seed, device=device, substeps=substeps)
+    spot, variance = simulate_market_paths(config.market, config.time_grid, n_paths, seed, device=device, substeps=substeps)
     return market_bank_from_paths(config, spot, variance, price_chunk_size=price_chunk_size, dtype=dtype)
 
 
-def initial_ledger(reference: torch.Tensor, config: HestonConfig):
+def initial_ledger(reference: torch.Tensor, config: HedgingConfig):
     """Zero initial holdings and the identical authoritative liability premium."""
-    premium = call_price(_tensor(config.spot0, reference), config.v0,
-                                config.n_steps * config.dt, config.liability_strike, config)
+    contract = config.portfolio.liability
+    premium = config.portfolio.liability_quantity * option_price(
+        _tensor(config.market.spot0, reference), config.market.v0, contract.maturity,
+        contract.strike, config.market, kind=contract.kind)
     zero = torch.zeros_like(reference)
     return LedgerState(zero + premium, zero[..., None].expand(*zero.shape, config.n_assets).clone(),
                        zero.clone(), zero[..., None].expand(*zero.shape, config.n_assets).clone(), zero.clone())
@@ -488,14 +360,14 @@ def initial_state(bank: MarketBank):
                        zero.clone(), bank.marks[:, 0].new_zeros((len(zero), bank.config.n_assets)), zero.clone())
 
 
-def map_action(raw, config: HestonConfig):
-    lower, upper = _tensor(config.holding_lower, raw), _tensor(config.holding_upper, raw)
+def map_action(raw, config: HedgingConfig):
+    lower, upper = _tensor(config.execution.holding_lower, raw), _tensor(config.execution.holding_upper, raw)
     return lower + (upper - lower) * (torch.tanh(raw) + 1) / 2
 
 
-def hybrid_action(modes, sizes, current_positions, config: HestonConfig):
+def hybrid_action(modes, sizes, current_positions, config: HedgingConfig):
     """Hold=0, buy=1, sell=2; sizes are legal fractions in [0,1]."""
-    lower, upper = _tensor(config.holding_lower, sizes), _tensor(config.holding_upper, sizes)
+    lower, upper = _tensor(config.execution.holding_lower, sizes), _tensor(config.execution.holding_upper, sizes)
     if bool(((sizes < 0) | (sizes > 1)).any()) or bool(((modes < 0) | (modes > 2)).any()):
         raise ValueError("hybrid action requires legal modes and unit interval sizes")
     return torch.where(modes == 1, current_positions + sizes * (upper - current_positions),
@@ -503,23 +375,23 @@ def hybrid_action(modes, sizes, current_positions, config: HestonConfig):
                                    current_positions))
 
 
-def transaction_cost(trade, marks, config: HestonConfig):
+def transaction_cost(trade, marks, config: HedgingConfig):
     """Commission floor on nonzero trades, plus quadratic cost and fixed ticket.
 
     Minimum commission replaces a smaller proportional fee; it is not an
     additional fee. HOLD costs zero, and mandatory liquidation pays all fees.
     """
-    commission = trade.abs() * marks * _tensor(config.proportional, marks)
-    if any(config.minimum_commission):
+    commission = trade.abs() * marks * _tensor(config.execution.proportional, marks)
+    if any(config.execution.vector("minimum_commission", config.n_assets)):
         commission = torch.where(trade != 0,
-                                 torch.maximum(commission, _tensor(config.minimum_commission, marks)),
+                                 torch.maximum(commission, _tensor(config.execution.minimum_commission, marks)),
                                  torch.zeros_like(commission))
     return (commission
-            + trade.square() * marks * _tensor(config.quadratic, marks)
-            + (trade != 0).to(marks.dtype) * _tensor(config.fixed_ticket, marks)).sum(-1)
+            + trade.square() * marks * _tensor(config.execution.quadratic, marks)
+            + (trade != 0).to(marks.dtype) * _tensor(config.execution.fixed_ticket, marks)).sum(-1)
 
 
-def feasible_targets(previous, targets, config: HedgeBookConfig, *, liquidating=False):
+def feasible_targets(previous, targets, config: HedgingConfig, *, liquidating=False):
     """Per-instrument legality, broadcasting over paths and candidate actions.
 
     Limits apply to trade increments, not desired target magnitudes. HOLD is
@@ -528,26 +400,26 @@ def feasible_targets(previous, targets, config: HedgeBookConfig, *, liquidating=
     The tolerance covers floating-point representation, not economic slack.
     """
     previous, targets = torch.broadcast_tensors(previous, targets)
-    lower, upper = _tensor(config.holding_lower, targets), _tensor(config.holding_upper, targets)
+    lower, upper = _tensor(config.execution.holding_lower, targets), _tensor(config.execution.holding_upper, targets)
     valid = torch.isfinite(targets) & (targets >= lower) & (targets <= upper)
-    if not any(config.minimum_trade + config.trade_lot):
+    if not any(config.execution.vector("minimum_trade", config.n_assets) + config.execution.vector("trade_lot", config.n_assets)):
         return valid
     trade = targets - previous
     hold = trade == 0
-    lot = _tensor(config.trade_lot, targets)
+    lot = _tensor(config.execution.trade_lot, targets)
     scale = torch.maximum(torch.maximum(targets.abs(), previous.abs()), lot)
     tolerance = 8 * torch.finfo(targets.dtype).eps * scale
     if not liquidating:
-        valid = valid & (hold | (trade.abs() + tolerance >= _tensor(config.minimum_trade, targets)))
-    if any(config.trade_lot):
+        valid = valid & (hold | (trade.abs() + tolerance >= _tensor(config.execution.minimum_trade, targets)))
+    if any(config.execution.vector("trade_lot", config.n_assets)):
         units = (trade / torch.where(lot > 0, lot, torch.ones_like(lot))).round()
         valid = valid & ((lot == 0) | hold | ((units != 0) & ((trade - units * lot).abs() <= tolerance)))
     return valid
 
 
-def trade_step(state: LedgerState, target_positions, marks, config: HestonConfig, *, liquidating=False):
-    """Execute legal targets without projection; retain legacy checkpoint behavior."""
-    if config.execution_features and not bool(feasible_targets(
+def trade_step(state: LedgerState, target_positions, marks, config: HedgingConfig, *, liquidating=False):
+    """Execute feasible targets without projection or observation-dependent rules."""
+    if not bool(feasible_targets(
             state.positions, target_positions, config, liquidating=liquidating).all()):
         raise ValueError("target holdings violate holding bounds, minimum-trade and lot rules")
     trade = target_positions - state.positions
@@ -559,7 +431,7 @@ def trade_step(state: LedgerState, target_positions, marks, config: HestonConfig
     )
 
 
-def liquidate(state: LedgerState, terminal_marks, terminal_payoff, config: HestonConfig):
+def liquidate(state: LedgerState, terminal_marks, terminal_payoff, config: HedgingConfig):
     liquidation_value = (state.positions * terminal_marks).sum(-1)
     liquidation_cost = transaction_cost(-state.positions, terminal_marks, config)
     final = trade_step(state, torch.zeros_like(state.positions), terminal_marks, config, liquidating=True)
@@ -587,12 +459,13 @@ def ledger_from_positions(bank: MarketBank, positions):
     return result
 
 
-def numpy_ledger(marks, positions, initial_cash, liability_payoff, config: HestonConfig):
+def numpy_ledger(marks, positions, initial_cash, liability_payoff, config: HedgingConfig):
     """Independent sequential cash reconstruction, including the final sell-out.
 
     Deliberately uses scalar instrument loops and no Torch ledger helper.
     """
     marks, positions = np.asarray(marks), np.asarray(positions)
+    execution = {name: config.execution.vector(name, config.n_assets) for name in EXECUTION_FIELDS}
     cash = np.broadcast_to(np.asarray(initial_cash), (len(marks),)).astype(np.float64).copy()
     previous = np.zeros((len(marks), config.n_assets))
     costs, tickets = np.zeros(len(marks)), np.zeros(len(marks))
@@ -601,12 +474,12 @@ def numpy_ledger(marks, positions, initial_cash, liability_payoff, config: Hesto
         target = positions[:, t] if t < positions.shape[1] else np.zeros_like(previous)
         for j in range(config.n_assets):
             trade = target[:, j] - previous[:, j]
-            commission = config.proportional[j] * np.abs(trade) * marks[:, t, j]
-            if config.minimum_commission[j]:
-                commission = np.where(trade != 0, np.maximum(commission, config.minimum_commission[j]), 0)
+            commission = execution["proportional"][j] * np.abs(trade) * marks[:, t, j]
+            if execution["minimum_commission"][j]:
+                commission = np.where(trade != 0, np.maximum(commission, execution["minimum_commission"][j]), 0)
             fee = (commission
-                   + config.quadratic[j] * trade**2 * marks[:, t, j]
-                   + config.fixed_ticket[j] * (trade != 0))
+                   + execution["quadratic"][j] * trade**2 * marks[:, t, j]
+                   + execution["fixed_ticket"][j] * (trade != 0))
             cash -= trade * marks[:, t, j] + fee
             costs += fee
             turnover[:, j] += np.abs(trade)
@@ -626,45 +499,54 @@ def market_parameter_names(config):
     return names
 
 
-def observation_fields(config: HedgeBookConfig):
-    instruments = ("stock", *(f"call_{i+1}" for i in range(config.n_assets - 1)))
+def instrument_names(config: HedgingConfig):
+    return ("stock", *(f"{option.kind}_{index + 1}" for index, option in enumerate(config.portfolio.hedges)))
+
+
+def observation_fields(config: HedgingConfig):
+    instruments = instrument_names(config)
     return (
         "time_fraction", "spot", "variance", "cash",
         *(f"{name}_position" for name in instruments),
         *(f"{name}_mid" for name in instruments),
-        *(f"{kind}_{j}" for kind in ("proportional", "quadratic", "fixed_ticket",
-                                    "holding_lower", "holding_upper") for j in range(config.n_assets)),
-        *(f"{kind}_{j}" for kind in (("minimum_commission", "minimum_trade", "trade_lot")
-                                    if config.execution_features else ()) for j in range(config.n_assets)),
-        *market_parameter_names(config),
-        "liability_strike", "liability_maturity",
-        *(f"hedge_strike_{i+1}" for i in range(config.n_assets - 1)),
-        *(f"hedge_maturity_{i+1}" for i in range(config.n_assets - 1)), "dt", "spot0", "v0",
+        *(f"{field}_{name}" for field in EXECUTION_FIELDS for name in instruments),
+        *market_parameter_names(config.market),
+        "liability_strike", "liability_maturity", "liability_quantity", "liability_kind",
+        *(f"hedge_strike_{i+1}" for i in range(len(config.portfolio.hedges))),
+        *(f"hedge_maturity_{i+1}" for i in range(len(config.portfolio.hedges))),
+        *(f"hedge_kind_{i+1}" for i in range(len(config.portfolio.hedges))),
+        "dt", "spot0", "v0",
     )
 
 
-OBSERVATION_FIELDS = observation_fields(HestonConfig())
+def decode_market_observation(observed, config: HedgingConfig):
+    """Inverse of the shared market-state normalization, using named fields."""
+    fields = observation_fields(config)
+    return (observed[..., fields.index("spot")] * config.market.spot0,
+            observed[..., fields.index("variance")] * max(config.market.v0, 1e-4))
 
 
-def observation_from_state(spot, variance, time_index, state: LedgerState, marks, config: HestonConfig):
-    """Only current information. Cash preserves wealth for static terminal ES.
+def observation_from_state(spot, variance, time_index, state: LedgerState, marks, config: HedgingConfig):
+    """Causal state; all execution fields are present even when their value is zero.
 
-    Values use S0 and v0 scales where appropriate. Append the episode-global
-    ES threshold outside this financial state when the risk method needs it.
+    Contract kinds use +1 for calls and -1 for puts. Values use S0 and v0 scales
+    where appropriate. A method needing a global ES threshold supplies it itself.
     """
+    market, portfolio = config.market, config.portfolio
     time = torch.zeros_like(spot) + _tensor(time_index, spot) / config.n_steps
-    values = [time[..., None], (spot / config.spot0)[..., None],
-              (variance / max(config.v0, 1e-4))[..., None], (state.cash / config.spot0)[..., None],
-              state.positions, marks / config.spot0]
-    for name in ("proportional", "quadratic", "fixed_ticket", "holding_lower", "holding_upper"):
-        values.append(_tensor(getattr(config, name), spot).expand(*spot.shape, config.n_assets))
-    if config.execution_features:
-        for name in ("minimum_commission", "minimum_trade", "trade_lot"):
-            values.append(_tensor(getattr(config, name), spot).expand(*spot.shape, config.n_assets))
-    market_parameters = tuple(getattr(config, name) for name in market_parameter_names(config))
-    constants = (*market_parameters,
-                 config.liability_strike, config.n_steps * config.dt, *config.hedge_strikes,
-                 *config.hedge_maturities, config.dt, config.spot0, config.v0)
+    values = [time[..., None], (spot / market.spot0)[..., None],
+              (variance / max(market.v0, 1e-4))[..., None], (state.cash / market.spot0)[..., None],
+              state.positions, marks / market.spot0]
+    for name in EXECUTION_FIELDS:
+        values.append(_tensor(config.execution.vector(name, config.n_assets), spot).expand(*spot.shape, config.n_assets))
+    market_parameters = tuple(getattr(market, name) for name in market_parameter_names(market))
+    liability = portfolio.liability
+    constants = (*market_parameters, liability.strike, liability.maturity,
+                 portfolio.liability_quantity, 1.0 if liability.kind == "call" else -1.0,
+                 *(option.strike for option in portfolio.hedges),
+                 *(option.maturity for option in portfolio.hedges),
+                 *(1.0 if option.kind == "call" else -1.0 for option in portfolio.hedges),
+                 config.dt, market.spot0, market.v0)
     values.append(_tensor(constants, spot).expand(*spot.shape, len(constants)))
     return torch.cat(values, dim=-1)
 

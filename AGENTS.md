@@ -1,8 +1,7 @@
 # Hedging Gym
 
 This private research repository owns the common hedging environment and its
-method adapters. Thesis owns research decisions and literature; the previous
-Thesis-Experiments implementation is historical evidence, not a second live core.
+method adapters.
 
 ## Structure and scientific contract
 
@@ -10,9 +9,11 @@ Thesis-Experiments implementation is historical evidence, not a second live core
   interfaces and terminal-risk evaluation. Keep learners outside this package.
 - `methods/`: small, explicitly attributed algorithm adapters. `experiments/`
   contains runnable comparisons; `tests/` checks financial/API behavior.
-- Market dynamics, execution frictions and learner-update schedules are
-  independent axes. Adaptation changes market parameters only; an operational
-  overlay stays fixed through A→B→A. All methods use the same accounting,
+- Market dynamics, portfolio, calendar, execution rules, risk level and learner
+  updates are independent choices. Compose their configurations; derive action
+  sizes and observation schemas from them rather than copying benchmark sizes.
+  Adaptation changes market parameters only; an operational overlay stays fixed
+  through A→B→A. All methods use the same accounting,
   information, initial capital, legal trades and evaluation paths.
 - QuantLib is an independent reference, not our own calculation validating
   itself. Check prices, cash accounting, discretization and policy risk separately.
@@ -47,4 +48,4 @@ Thesis-Experiments implementation is historical evidence, not a second live core
 - Push only to the intended private remote. Subsequent main merges need user
   approval. Preserve unrelated edits and historical research evidence.
 - Remove a completed worktree/branch only after its retained work is integrated;
-  a worktree is not an archive. Do not delete old evidence during migration.
+  a worktree is not an archive. Preserve historical research evidence.

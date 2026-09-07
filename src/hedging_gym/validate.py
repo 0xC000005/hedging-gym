@@ -1,4 +1,4 @@
-"""ADAPTATION / bounded implementation checks, not a distribution certificate.
+"""Independent price, accounting and environment checks.
 
 Run ``python -m hedging_gym.validate --device cpu`` after install.
 Checks selected analytic prices, a complete independently reconstructed ledger,
@@ -19,7 +19,7 @@ from .gym_env import HedgingEnv
 
 
 def scripted_targets(observed, ledger, time_index, config):
-    """Legal .1/HOLD/.2/HOLD in both instruments; final holdings are nonzero."""
+    """Legal .1/HOLD/.2/HOLD in each instrument; final holdings are nonzero."""
     if time_index % 2:
         return ledger.positions
     return torch.full_like(ledger.positions, .1 if time_index % 4 == 0 else .2)
@@ -30,7 +30,7 @@ def run(device="cpu"):
         raise RuntimeError("CUDA was requested but is unavailable; use --device cpu")
     torch.set_num_threads(4)
     started = time.perf_counter()
-    print(f"ADAPTATION / IMPLEMENTATION CHECKS; device={device}; CPU threads=4; "
+    print(f"FINANCIAL VALIDATION; device={device}; CPU threads=4; "
           "9 float64 prices, 8 complete 30-date Heston tapes, scalar Gym checker; "
           "market seed=2026090610; evaluation seed=2026090611", flush=True)
     # Fixed ordinary, short-expiry and higher-variance states; exact n/252 grid.
@@ -40,8 +40,8 @@ def run(device="cpu"):
         prices = finance.call_price(
             torch.tensor([s for s, v, n, k in states], dtype=torch.float64, device=device),
             [v for s, v, n, k in states], [n/252 for s, v, n, k in states],
-            [k for s, v, n, k in states], config).cpu().numpy()
-        reference = np.array([finance.quantlib_call_price(s, v, n/252, k, config)
+            [k for s, v, n, k in states], config.market).cpu().numpy()
+        reference = np.array([finance.quantlib_option_price(s, v, n/252, k, config.market)
                               for s, v, n, k in states])
         np.testing.assert_allclose(prices, reference, atol=1e-8, rtol=1e-7)
         print(f"PASS {model} prices: 3 states; max error={np.max(np.abs(prices-reference)):.3g}; "
@@ -53,17 +53,17 @@ def run(device="cpu"):
           "minimum trades=.01/.1; lots=.001/.1; targets=.1/HOLD/.2/HOLD", flush=True)
     bank = finance.generate_market_bank(config, 8, 2026090610)
     _, tape = evaluate_controller(scripted_targets, bank, device=device, batch_size=8,
-        mode_seed=2026090611, label="IMPLEMENTATION CHECK / operational Heston", progress=True)
+        mode_seed=2026090611, label="Operational Heston accounting", progress=True)
     positions = tape["positions"].numpy().astype(np.float64)
     trades = np.diff(positions, axis=1, prepend=np.zeros_like(positions[:, :1]),
                      append=np.zeros_like(positions[:, :1]))
-    if not (np.isfinite(positions).all() and (positions >= config.holding_lower).all()
-            and (positions <= config.holding_upper).all()
+    if not (np.isfinite(positions).all() and (positions >= config.execution.vector("holding_lower", config.n_assets)).all()
+            and (positions <= config.execution.vector("holding_upper", config.n_assets)).all()
             and ((trades[:, :-1] == 0) |
-                 (np.abs(trades[:, :-1]) >= config.minimum_trade)).all()):
+                 (np.abs(trades[:, :-1]) >= config.execution.vector("minimum_trade", config.n_assets))).all()):
         raise AssertionError("independent tape check: invalid holdings or minimum trade")
     # This fixed .1/.2 probe allows only float32 representation error in lots.
-    lots = np.asarray(config.trade_lot)
+    lots = np.asarray(config.execution.vector("trade_lot", config.n_assets))
     np.testing.assert_allclose(trades, np.round(trades/lots)*lots, atol=2e-7, rtol=0)
     reference = finance.numpy_ledger(bank.marks.numpy(), positions,
         bank.liability[:, 0].numpy(), bank.liability[:, -1].numpy(), config)
@@ -75,7 +75,7 @@ def run(device="cpu"):
           "includes terminal liquidation; absolute tolerance=2e-6", flush=True)
     if device == "cuda":
         _, cpu_tape = evaluate_controller(scripted_targets, bank, device="cpu", batch_size=8,
-            mode_seed=2026090611, label="IMPLEMENTATION CHECK / CPU replay", progress=True)
+            mode_seed=2026090611, label="CPU replay", progress=True)
         torch.testing.assert_close(tape["terminal_loss"], cpu_tape["terminal_loss"], atol=2e-6, rtol=0)
         print("PASS CPU/CUDA terminal losses on the same bank; absolute tolerance=2e-6", flush=True)
     env = HedgingEnv(benchmark_config())
