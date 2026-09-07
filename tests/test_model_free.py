@@ -1,0 +1,85 @@
+"""Distribution equations, detached experience and common-ledger integration."""
+
+from dataclasses import replace
+
+import pytest
+import torch
+
+from hedging_gym.benchmark import benchmark_config
+from hedging_gym.config import PortfolioConfig, TimeGrid
+from hedging_gym.evaluation import evaluate_controller
+from hedging_gym.finance import generate_market_bank
+from methods.controllers import policy_controller
+from methods.model_free import (DistributionalCritic, collect_episodes,
+    gpd_expected_excess, gpd_nll, quantile_huber_loss, train_model_free)
+from methods.policies import DirectDHPolicy
+
+
+def test_quantile_loss_and_pareto_tail_equations():
+    prediction = torch.zeros(1, 2, requires_grad=True)
+    loss = quantile_huber_loss(prediction, torch.ones(1, 1), torch.tensor([.25, .75]))
+    torch.testing.assert_close(loss, torch.tensor(.25))
+    loss.backward()
+    assert (prediction.grad < 0).all()
+    # GPD(scale=1, shape=.5): survival=(1+.5*y)^-2 and mean=2.
+    cutoff = torch.tensor([-1., 0., 3.], dtype=torch.float64)
+    scale, shape = torch.ones(3, dtype=torch.float64), torch.full((3,), .5, dtype=torch.float64)
+    torch.testing.assert_close(gpd_expected_excess(cutoff, scale, shape), cutoff.new_tensor([3., 2., .8]))
+    torch.testing.assert_close(gpd_nll(cutoff.clamp_min(0), scale, shape), 3*torch.log1p(.5*cutoff.clamp_min(0)))
+
+
+def test_exdrl_tail_is_used_for_targets_and_actor_gradients():
+    critic = DistributionalCritic(3, 2, hidden=(8,), quantiles=32, tail_threshold=.8).double()
+    observed, actions = torch.zeros(4, 3).double(), torch.zeros(4, 2).double()
+    raw, _, _ = critic(observed, actions)
+    spliced = critic.distribution(observed, actions)
+    mask = critic.probabilities > .8
+    assert not torch.equal(spliced[:, mask], raw.sort(-1).values[:, mask])
+    objective = critic.expected_ru(observed, actions, torch.tensor(0.), .95).mean()
+    objective.backward()
+    assert critic.tail[-1].weight.grad.abs().sum() > 0
+    assert torch.isfinite(critic.tail_loss(observed, actions))
+
+
+def test_ru_threshold_gradient_keeps_money_units_after_critic_scaling():
+    critic = DistributionalCritic(1, 1, hidden=(), quantiles=4).double()
+    with torch.no_grad():
+        critic.quantiles[-1].weight.zero_()
+        critic.quantiles[-1].bias.copy_(torch.tensor([-2., -1., 1., 3.]))
+    observed, action = torch.zeros(1, 1).double(), torch.zeros(1, 1).double()
+    for scale in (.001, 1., 1000.):
+        threshold_money = torch.tensor(.5*scale, dtype=torch.float64, requires_grad=True)
+        objective_money = scale * critic.expected_ru(observed, action, threshold_money/scale, .8).mean()
+        gradient, = torch.autograd.grad(objective_money, threshold_money)
+        # Two of four atoms exceed the threshold: dRU/dzeta = 1 - .5/.2.
+        torch.testing.assert_close(gradient, gradient.new_tensor(-1.5))
+
+
+@pytest.mark.parametrize("method,stock_only", [("hull_rl", True), ("exdrl", False)])
+def test_model_free_updates_detached_environment_and_common_evaluation(method, stock_only):
+    config = benchmark_config(model="gbm", time_grid=TimeGrid(n_steps=3))
+    if stock_only:
+        config = benchmark_config(model="gbm", time_grid=TimeGrid(n_steps=3),
+            portfolio=PortfolioConfig(config.portfolio.liability, ()))
+    bank = generate_market_bank(config, 24, 811, dtype=torch.float64)
+    torch.manual_seed(7)
+    initial = DirectDHPolicy(config, hidden=(8,)).double()
+    transitions, losses, _ = collect_episodes(initial, replace(bank, marks=bank.marks.requires_grad_()), n_step=2)
+    assert all(not value.requires_grad for value in transitions)
+    assert not losses.requires_grad
+    # At the first of three dates, a two-step transition must bootstrap;
+    # the other two dates carry the actual terminal accounting loss.
+    costs, done = transitions[2].reshape(24, 3), transitions[4].reshape(24, 3)
+    assert not done[:, 0].any() and done[:, 1:].all()
+    torch.testing.assert_close(costs[:, 0], torch.zeros(24, dtype=torch.float64))
+    torch.testing.assert_close(costs[:, 1:], losses[:, None].expand(-1, 2))
+    policy, metadata = train_model_free(method, bank, seed=7, updates=3, batch_size=8,
+        hidden=(8,), quantiles=32, tail_threshold=.8, gradient_steps=2, progress=False)
+    assert any(not torch.equal(before, after) for before, after in zip(initial.parameters(), policy.parameters()))
+    assert metadata["gradient_updates"] == 6
+    assert metadata["history"][-1]["completed"] == 3
+    heldout = generate_market_bank(config, 12, 822, dtype=torch.float64)
+    metrics, tape = evaluate_controller(policy_controller(policy), heldout, zeta=metadata["zeta"])
+    assert metrics["constraint_violations"] == 0
+    assert torch.isfinite(tape["terminal_loss"]).all()
+    assert policy.n_assets == config.n_assets
