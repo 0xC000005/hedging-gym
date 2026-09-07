@@ -1,0 +1,29 @@
+[build-system]
+requires = ["hatchling>=1.27,<2"]
+build-backend = "hatchling.build"
+
+[project]
+name = "hedging-gym"
+version = "0.1.0a1"
+description = "CPU/GPU-batched Gymnasium hedging environment with independent financial validation"
+readme = "README.md"
+requires-python = ">=3.12,<3.14"
+dependencies = [
+    "numpy>=2.1,<3",
+    "QuantLib==1.43",
+    "torch==2.14.0",
+    "gymnasium==1.2.3",
+]
+
+[dependency-groups]
+dev = ["pytest==9.1.1"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/hedging_gym"]
+
+[tool.hatch.build.targets.sdist]
+include = ["src", "methods", "experiments", "tests", "docs", "scripts", "README.md", "AGENTS.md", ".python-version", "pyproject.toml", "uv.lock"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
