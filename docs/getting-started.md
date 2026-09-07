@@ -43,6 +43,10 @@ available, select `--device cuda` for the example or validator. Device, batch
 size and integration resolution are part of reproducibility; equal seeds across
 devices do not promise identical paths.
 
+On Linux, the locked PyTorch package includes CUDA libraries even for CPU runs.
+A first installation can download several gigabytes; `--device` selects where
+computation runs, not which dependencies are installed.
+
 ## Configure an experiment
 
 `benchmark_config()` supplies one stock, one ATM hedge call and an ATM call
@@ -119,15 +123,20 @@ from hedging_gym.finance import generate_market_bank
 config = benchmark_config(model="gbm")
 bank = generate_market_bank(config, n_paths=64, seed=42)
 
-def hold_cash(observed, ledger, time_index, config):
-    return torch.zeros_like(ledger.positions)
+def fixed_stock(observed, ledger, time_index, config):
+    targets = ledger.positions.clone()
+    targets[:, 0] = 0.1
+    return targets
 
-metrics, tape = evaluate_controller(hold_cash, bank)
+metrics, tape = evaluate_controller(fixed_stock, bank)
 print(metrics)
 ```
 
 The controller receives current observations, ledger state, date index and
-configuration. Keep it frozen during evaluation. The returned tape records
+configuration. Treat these inputs as read-only: do not modify observations or
+ledger tensors in place. Clone holdings when adjusting them, as above; only
+the environment updates the actual ledger. Keep learner weights frozen during
+evaluation. The returned tape records
 actual holdings, terminal losses and execution costs for cash reconstruction.
 For a learned comparison, use separate training and evaluation paths and pool
 complete losses when calculating ES; minibatch ES values cannot be averaged.

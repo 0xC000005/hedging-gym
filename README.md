@@ -47,8 +47,8 @@ env.close()
 ```
 
 Actions are target holdings. This example holds no hedges and shows the complete
-settlement path. Reward is zero until settlement, then terminal P&L; optimizing
-mean reward and minimizing expected shortfall are different objectives.
+settlement path. By default, reward is zero until settlement, then terminal P&L.
+Optimizing mean reward and minimizing expected shortfall are different objectives.
 
 - [Getting started](docs/getting-started.md): Linux/WSL setup, configuration,
   tensor and Gym interfaces, and first checks.

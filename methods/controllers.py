@@ -1,6 +1,6 @@
 """Adapt existing baselines to the core's causal controller interface.
 
-Controllers receive the current observation and ledger, never the market bank.
+Controllers receive read-only observations and ledger state, never the market bank.
 Targets reach the common environment unchanged; infeasible trades raise.
 """
 

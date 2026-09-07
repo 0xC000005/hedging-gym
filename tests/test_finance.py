@@ -4,8 +4,38 @@ import numpy as np
 import pytest
 import torch
 
-from hedging_gym import (finance, benchmark_config, HestonConfig, TimeGrid,
+from hedging_gym import (finance, benchmark_config, GBMConfig, HestonConfig, BatesConfig, TimeGrid,
                          PortfolioConfig, EuropeanOption, ExecutionConfig)
+
+
+@pytest.mark.parametrize("market", [GBMConfig(), HestonConfig(), BatesConfig()])
+def test_shared_numpy_shocks_match_tensor_transitions(market):
+    spot, variance = torch.ones(3), torch.full((3,), .04)
+    shocks = finance.market_shocks(market, np.random.default_rng(9), count=3, dt=1/252)
+    expected = finance.transition(spot, variance, torch.as_tensor(shocks, dtype=spot.dtype), market, dt=1/252)
+    actual = finance.transition(spot, variance, shocks, market, dt=1/252)
+    for numpy_result, tensor_result in zip(actual, expected):
+        torch.testing.assert_close(numpy_result, tensor_result, rtol=0, atol=0)
+
+
+def test_small_float32_put_matches_quantlib_and_both_initial_ledgers():
+    market, grid = GBMConfig(spot0=100.), TimeGrid(n_steps=5)
+    contract = EuropeanOption(90., grid.horizon, "put")
+    spot = torch.tensor(market.spot0, requires_grad=True)
+    price = finance.option_price(spot, market.v0, contract.maturity, contract.strike, market, kind="put")
+    reference = finance.quantlib_option_price(100., .04, grid.horizon, 90., market, kind="put")
+    assert price.dtype == spot.dtype
+    assert float(price.detach()) == pytest.approx(reference, rel=1e-6, abs=1e-10)
+    delta, = torch.autograd.grad(price, spot)
+    bump = .001
+    reference_delta = (finance.quantlib_option_price(100.+bump, .04, grid.horizon, 90., market, kind="put")
+                       - finance.quantlib_option_price(100.-bump, .04, grid.horizon, 90., market, kind="put")) / (2*bump)
+    assert float(delta) == pytest.approx(reference_delta, rel=1e-5, abs=1e-9)
+    config = benchmark_config(model=market, time_grid=grid,
+        portfolio=PortfolioConfig(contract, liability_quantity=-3.7))
+    bank = finance.generate_market_bank(config, 2, 9)
+    direct = finance.initial_ledger(torch.zeros(2), config)
+    torch.testing.assert_close(direct.cash, finance.initial_state(bank).cash, rtol=0, atol=0)
 
 
 def test_heston_prices_and_delta_match_quantlib_in_short_and_rare_states():

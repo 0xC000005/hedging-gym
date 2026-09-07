@@ -51,7 +51,8 @@ def benchmark_config(*, model="heston", time_grid=None, portfolio=None,
 
     Defaults sell one ATM call at the grid horizon and hedge with stock and one
     ATM call at twice that horizon. Default fees and holding bounds follow the
-    selected instrument count; explicitly supplied components are preserved.
+    selected instrument count. A named preset supplies execution defaults;
+    explicit execution replaces that complete component, including zero fees.
     """
     models = {"gbm": GBMConfig, "heston": HestonConfig, "bates": BatesConfig}
     if isinstance(model, str):
@@ -65,13 +66,13 @@ def benchmark_config(*, model="heston", time_grid=None, portfolio=None,
         liability=EuropeanOption(strike=market.spot0, maturity=grid.horizon),
         hedges=(EuropeanOption(strike=market.spot0, maturity=2*grid.horizon),))
         if portfolio is None else portfolio)
-    rules = (ExecutionConfig(proportional=(.0005,) + (.01,) * (book.n_assets-1),
+    rules = ExecutionConfig(proportional=(.0005,) + (.01,) * (book.n_assets-1),
         holding_lower=(-1.,) * book.n_assets,
         holding_upper=(2.,) + (1.,) * (book.n_assets-1))
-        if execution is None else execution)
     base = HedgingConfig(market=market, time_grid=grid, portfolio=book,
         execution=rules, risk=RiskConfig() if risk is None else risk)
-    return operational_config(base, name)
+    preset = operational_config(base, name)
+    return preset if execution is None else replace(preset, execution=execution)
 
 
 def adaptation_configs(base_config=None, *, market_changes=None):

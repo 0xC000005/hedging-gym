@@ -228,6 +228,7 @@ def heston_transition(spot, variance, shocks=None, config: HestonConfig | None =
         uv = torch.rand(spot.shape, device=spot.device, dtype=spot.dtype, generator=generator)
         zs = torch.randn(spot.shape, device=spot.device, dtype=spot.dtype, generator=generator)
     else:
+        shocks = torch.as_tensor(shocks, dtype=spot.dtype, device=spot.device)
         zv, uv, zs = shocks.unbind(-1)
     decay = math.exp(-config.kappa * dt)
     mean = config.theta + (variance - config.theta) * decay
@@ -255,11 +256,17 @@ def heston_transition(spot, variance, shocks=None, config: HestonConfig | None =
 
 
 def option_price(spot, variance, maturity, strike, market, *, kind="call"):
-    """Price a European call or put; r=q=0 put-call parity preserves gradients."""
+    """Price in float64 before restoring the input dtype; preserve gradients."""
     if kind not in ("call", "put"):
         raise ValueError("choose call or put")
-    call = call_price(spot, variance, maturity, strike, market)
-    return call if kind == "call" else (call - _tensor(spot, call) + _tensor(strike, call)).clamp_min(0)
+    if not isinstance(spot, torch.Tensor):
+        spot = torch.as_tensor(spot, dtype=torch.float64)
+    reference = spot.to(torch.float64)
+    call = call_price(reference, variance, maturity, strike, market)
+    # A small put is the difference of large terms. Apply r=q=0 parity before
+    # rounding the call price to the ledger dtype, not after it.
+    value = call if kind == "call" else (call - reference + _tensor(strike, call)).clamp_min(0)
+    return value.to(spot.dtype)
 
 
 def mark_state(spot, variance, time_index, config: HedgingConfig):
@@ -346,9 +353,10 @@ def generate_market_bank(config, n_paths: int, seed: int, *, device="cpu", dtype
 def initial_ledger(reference: torch.Tensor, config: HedgingConfig):
     """Zero initial holdings and the identical authoritative liability premium."""
     contract = config.portfolio.liability
-    premium = config.portfolio.liability_quantity * option_price(
-        _tensor(config.market.spot0, reference), config.market.v0, contract.maturity,
-        contract.strike, config.market, kind=contract.kind)
+    # Match mark_state: price and apply quantity before casting to the ledger dtype.
+    premium = (config.portfolio.liability_quantity * option_price(
+        _tensor(config.market.spot0, reference.to(torch.float64)), config.market.v0, contract.maturity,
+        contract.strike, config.market, kind=contract.kind)).to(reference.dtype)
     zero = torch.zeros_like(reference)
     return LedgerState(zero + premium, zero[..., None].expand(*zero.shape, config.n_assets).clone(),
                        zero.clone(), zero[..., None].expand(*zero.shape, config.n_assets).clone(), zero.clone())
@@ -363,16 +371,6 @@ def initial_state(bank: MarketBank):
 def map_action(raw, config: HedgingConfig):
     lower, upper = _tensor(config.execution.holding_lower, raw), _tensor(config.execution.holding_upper, raw)
     return lower + (upper - lower) * (torch.tanh(raw) + 1) / 2
-
-
-def hybrid_action(modes, sizes, current_positions, config: HedgingConfig):
-    """Hold=0, buy=1, sell=2; sizes are legal fractions in [0,1]."""
-    lower, upper = _tensor(config.execution.holding_lower, sizes), _tensor(config.execution.holding_upper, sizes)
-    if bool(((sizes < 0) | (sizes > 1)).any()) or bool(((modes < 0) | (modes > 2)).any()):
-        raise ValueError("hybrid action requires legal modes and unit interval sizes")
-    return torch.where(modes == 1, current_positions + sizes * (upper - current_positions),
-                       torch.where(modes == 2, current_positions - sizes * (current_positions - lower),
-                                   current_positions))
 
 
 def transaction_cost(trade, marks, config: HedgingConfig):

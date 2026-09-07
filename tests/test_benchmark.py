@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 from hedging_gym import benchmark, finance
-from hedging_gym.config import EuropeanOption, GBMConfig, PortfolioConfig, RiskConfig, TimeGrid
+from hedging_gym.config import EuropeanOption, ExecutionConfig, GBMConfig, PortfolioConfig, RiskConfig, TimeGrid
 
 
 def test_presets_share_observations_and_isolate_the_named_friction():
@@ -21,6 +21,17 @@ def test_presets_share_observations_and_isolate_the_named_friction():
         assert config.time_grid == basic.time_grid and config.risk == basic.risk
         assert {key for key, value in asdict(config.execution).items()
                 if value != asdict(basic.execution)[key]} == {changed_field}
+
+
+def test_explicit_execution_replaces_preset_defaults():
+    for fee in (0., .02):
+        execution = ExecutionConfig(fixed_ticket=fee)
+        config = benchmark.benchmark_config(name="operational_fixed", execution=execution)
+        assert config.execution is execution
+        assert config.execution.fixed_ticket == fee
+        overlaid = benchmark.operational_config(config, "operational_fixed")
+        assert overlaid.execution.fixed_ticket == .0001
+        assert benchmark.operational_config(config, "operational_fixed", fixed_ticket=fee).execution == execution
 
 
 def test_market_adaptation_and_execution_overlay_compose_without_cross_talk():

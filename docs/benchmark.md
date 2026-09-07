@@ -9,7 +9,9 @@ one method is best.
 
 `benchmark_config()` selects the following settings. Passing a component
 replaces that component; bare market configurations contain no portfolio or
-trading calendar.
+trading calendar. `name=...` supplies execution defaults only when `execution`
+is omitted. An explicit `ExecutionConfig` replaces the whole component,
+including zero fees; use `operational_config` to deliberately overlay it later.
 
 | Component | Default |
 |---|---|
@@ -43,26 +45,26 @@ Let decisions occur at $t_i=i\Delta t$, $i=0,\ldots,N-1$, with settlement at
 $T=t_N$. Let $M_i$ be the vector of stock and hedge-option mid-prices, and $h_i$
 the target holdings after decision $i$. Starting from $h_{-1}=0$, the trade is
 
-$$
+```math
 \Delta h_i=h_i-h_{i-1}.
-$$
+```
 
 Let $Q$ be the signed liability quantity and $V_0$ its unit initial model price.
 Initial cash is $B_{-1}=QV_0$. At zero interest and dividend rates, the
 self-financing cash update is
 
-$$
+```math
 B_i=B_{i-1}-\Delta h_i^{\mathsf T}M_i-C_i(\Delta h_i).
-$$
+```
 
 At settlement, all remaining hedge holdings are closed at their current marks
 and the signed liability payoff $Q\Phi(S_T)$ is paid:
 
-$$
+```math
 \Pi_T=B_{N-1}+h_{N-1}^{\mathsf T}M_N
       -C_N(-h_{N-1})-Q\Phi(S_T),
 \qquad L=-\Pi_T.
-$$
+```
 
 Here $\Phi(S_T)=(S_T-K)^+$ for a call and $(K-S_T)^+$ for a put. A hedge option
 expiring at $T$ is closed at its payoff; a later-expiring hedge is sold at its
@@ -73,12 +75,12 @@ For instrument $j$, write $p_j$ for the proportional rate, $a_j$ for the
 quadratic rate, $f_j$ for a fixed ticket and $m_j$ for a minimum commission.
 The charge for trade $x_j$ at mid-price $M_{i,j}$ is
 
-$$
+```math
 c_{i,j}(x_j)=\mathbf{1}_{\{x_j\ne0\}}
  \left[\max\left(p_j|x_j|M_{i,j},m_j\right)+f_j\right]
  +a_jx_j^2M_{i,j},
 \qquad C_i(x)=\sum_j c_{i,j}(x_j).
-$$
+```
 
 HOLD therefore costs zero. A minimum commission replaces a smaller proportional
 charge; it is not added to it. Position limits constrain $h_i$. A nonzero trade
@@ -91,12 +93,12 @@ than silently projecting them.
 
 The configured risk measure is upper-tail expected shortfall of terminal loss:
 
-$$
-\operatorname{ES}_{\alpha}(L)
-=\frac{1}{1-\alpha}\int_{\alpha}^{1}\operatorname{VaR}_u(L)\,du
+```math
+\mathrm{ES}_{\alpha}(L)
+=\frac{1}{1-\alpha}\int_{\alpha}^{1}\mathrm{VaR}_u(L)\,du
 =\min_{\zeta\in\mathbb{R}}
  \left\{\zeta+\frac{\mathbb{E}[(L-\zeta)^+]}{1-\alpha}\right\}.
-$$
+```
 
 This optimized-certainty-equivalent representation is also used in
 [Deep Hedging, Section 3.2](https://arxiv.org/html/1802.03042v1#S3.SS2).
@@ -108,9 +110,15 @@ empirical ES with fractional weight at the tail boundary. Its primary metric
 is `expected_shortfall`, accompanied by `risk_alpha`; ES95 and ES99 are additional
 diagnostics. Averaging minibatch ES gives a different statistic.
 
-Gym rewards are zero before settlement and equal $\Pi_T$ at settlement. A
-standard expected-return learner consequently optimizes mean P&L unless its
-training objective is explicitly changed to the configured risk measure.
+By default, Gym rewards are zero before settlement and equal $\Pi_T$ at
+settlement. Changing `RiskConfig` alone does not change that reward: an ordinary
+expected-return learner still optimizes mean P&L.
+
+Passing `risk_threshold=zeta` to either Gym wrapper instead returns
+`-config.risk.loss(terminal_loss, zeta)` at settlement, using `config.risk.alpha`.
+The learner fits this global threshold on training data; the environment does
+not learn it. The tensor training adapters apply the same risk loss directly
+to complete episode batches.
 
 ## Market models and information
 
@@ -118,11 +126,11 @@ GBM uses exact conditional lognormal stock steps with constant variance $v_0$.
 Its configurable physical drift affects simulated paths; risk-neutral option
 pricing uses the required zero-rate, zero-dividend convention. Heston evolves
 
-$$
+```math
 \frac{dS_t}{S_t}=\sqrt{v_t}\,dW_t^S,\qquad
 dv_t=\kappa(\theta-v_t)\,dt+\sigma\sqrt{v_t}\,dW_t^v,
 \qquad d\langle W^S,W^v\rangle_t=\rho\,dt.
-$$
+```
 
 Bates adds compensated compound-Poisson lognormal stock jumps. The physical and
 pricing jump parameters coincide here. Heston/Bates stock and variance paths
@@ -136,6 +144,22 @@ parameters, contract terms and execution rules. They do not contain future
 path values. Their schema depends on the chosen market and portfolio. All
 controllers must derive their dimensions from that schema. Internal simulation
 substeps refine the market integrator without adding trading decisions.
+
+`hedging_gym.finance.observation_fields(config)` lists columns in their exact
+order. Instrument blocks follow stock, then `portfolio.hedges`.
+
+| Observation fields | Values supplied to the controller |
+|---|---|
+| `time_fraction` | Decision index divided by the number of steps |
+| `spot`, `cash`, instrument mids | Divided by `market.spot0` |
+| `variance` | Divided by `max(market.v0, 1e-4)` |
+| Instrument positions | Stock/option quantities, not normalized |
+| Execution rules and market parameters | Their configured values |
+| Contract strikes, maturities, quantity, `dt`, `spot0`, `v0` | Their configured values; maturities and `dt` are in years |
+| Liability and hedge kinds | +1 for calls, -1 for puts |
+
+`decode_market_observation(observed, config)` recovers spot and variance in model
+units. Risk confidence and the learned ES threshold are not observation fields.
 
 ## Execution presets and regime changes
 

@@ -30,6 +30,8 @@ def evaluate_controller(controller, bank, *, device=None, batch_size=1024, mode_
     Trade tapes retain the executed quantities. Batch size and order are part of the sampled-policy RNG contract, as in native evaluation.
     Timing includes transfers, controller calls, ledger execution and tapes;
     bank generation/training are external costs and are not silently zeroed.
+    Controller inputs are read-only. Clone ledger.positions when constructing
+    targets by in-place adjustment; only the environment updates its ledger.
     """
     if batch_size < 1 or len(bank.spot) == 0:
         raise ValueError("positive batch size and a nonempty market bank required")
