@@ -15,6 +15,7 @@ outside it.
 | `model_free.py` | Quantile D4PG and EX-D4PG with a generalized-Pareto tail |
 | `sb3.py` | Stock SB3 algorithms through a thin batched VecEnv/action-coordinate adapter |
 | `adaptation.py` | Full-network fine-tuning and task-embedding adaptation |
+| `amago_adapter.py` | Optional official AMAGO/AMAGO-2 cross-book memory qualification |
 | `alphazero.py` | Stochastic PUCT, learned policy/value and search-improvement training |
 | `hybrid.py` | Discrete HOLD/TRADE choices with pathwise sizing and categorical PPO |
 | `planning.py` | CEM root-action improvement, feedback rollouts and optional gradient refinement |
@@ -241,6 +242,11 @@ The multitask source set is disclosed: baseline A and a market with 0.8 times
 its initial/long-run variance, not future evaluation B. Pre-update return-A
 performance measures forgetting; post-update performance measures recovery.
 No policy is restored using a hidden regime lookup.
+
+For the separate official AMAGO donor qualification, see
+[Context-aware hedging](../docs/amago-context.md). It keeps the common financial
+environment, but currently trains a fixed-threshold RU objective; it is not yet
+an ES-optimized competitive adaptation baseline.
 
 For research comparisons, use development data to establish stable training,
 then freeze budgets/settings and evaluate multiple seeds on a fresh, adequately
