@@ -138,3 +138,66 @@ def test_source_split_and_full_outer_optimizer_resume_are_exact(tmp_path):
     assert control_work["initialization_forward_rollouts"] == 0
     assert control_work["support_gradient_rollouts"] == 0
     assert control_work["source_query_paths"] == [24, 24]
+
+
+def test_ru_continuation_matches_direct_gradient_and_resumes_thresholds(tmp_path):
+    config = benchmark_config(model="gbm", time_grid=TimeGrid(n_steps=2))
+    other = replace(config, market=replace(config.market, v0=.0625))
+    banks = (generate_market_bank(config, 24, 151, dtype=torch.float64),
+             generate_market_bank(other, 24, 152, dtype=torch.float64))
+    policy, metadata = train_multitask(banks, updates=2, batch_size=8,
+        hidden=(4,), embedding_dim=2, seed=31, progress=False)
+    options = dict(seed=41, inner_updates=0, query_size=8, outer_loss="ru",
+                   outer_lr=1e-4, zeta_lr=3e-4, progress=False)
+
+    # A direct ordinary source-policy RU update must equal the gradient mapped
+    # from the K0 clone. Both clip policy and threshold groups separately.
+    reference = deepcopy(policy)
+    reference.shared.requires_grad_(True)
+    reference.source_embeddings.requires_grad_(True)
+    reference.embedding.requires_grad_(False)
+    reference.active_task = 0
+    parameters = [*reference.shared.parameters(), reference.source_embeddings]
+    thresholds = nn.Parameter(torch.tensor(metadata["source_zetas"], dtype=torch.float64))
+    optimizer = torch.optim.Adam([
+        {"params": parameters, "lr": options["outer_lr"]},
+        {"params": [thresholds], "lr": options["zeta_lr"]},
+    ])
+    indices = torch.randperm(24, generator=torch.Generator().manual_seed(41+200003))[:8]
+    losses = rollout(reference, bank_subset(banks[0], indices))["terminal_loss"]
+    objective = config.risk.loss(losses, thresholds[0]).mean()
+    objective.backward()
+    torch.nn.utils.clip_grad_norm_(parameters, 5., error_if_nonfinite=True)
+    torch.nn.utils.clip_grad_norm_([thresholds], 5., error_if_nonfinite=True)
+    optimizer.step()
+    reference.prepare_adaptation()
+    control, control_metadata = train_adapt_aware(deepcopy(policy), metadata, banks,
+        episodes=1, **options)
+    for name, value in reference.state_dict().items():
+        if isinstance(value, torch.Tensor):
+            torch.testing.assert_close(value, control.state_dict()[name], rtol=0., atol=0.)
+        else:
+            assert value == control.state_dict()[name]
+    assert control_metadata["source_zetas"] == thresholds.detach().tolist()
+    record = control_metadata["meta_pretraining"]["history"][0]
+    assert record["ru_objective"] == float(objective.detach())
+    assert record["query_es"] == float(differentiable_empirical_es(losses.detach(), config.risk.alpha))
+
+    full, full_metadata = train_adapt_aware(deepcopy(policy), metadata, banks,
+        episodes=4, **options)
+    checkpoint = tmp_path / "ru-latest.pt"
+    train_adapt_aware(deepcopy(policy), metadata, banks,
+        episodes=2, checkpoint_path=checkpoint, **options)
+    resumed, resumed_metadata = train_adapt_aware(deepcopy(policy), metadata, banks,
+        episodes=4, checkpoint_path=checkpoint, resume_from=checkpoint, **options)
+    for name, value in full.state_dict().items():
+        if isinstance(value, torch.Tensor):
+            torch.testing.assert_close(value, resumed.state_dict()[name], rtol=0., atol=0.)
+        else:
+            assert value == resumed.state_dict()[name]
+    assert resumed_metadata["source_zetas"] == full_metadata["source_zetas"]
+    assert resumed_metadata["meta_pretraining"]["work"] == full_metadata["meta_pretraining"]["work"]
+    saved = torch.load(checkpoint, weights_only=False)
+    assert saved["thresholds"].tolist() == full_metadata["source_zetas"]
+    assert len(saved["optimizer"]["param_groups"]) == 2
+    assert all(float(state["step"]) == 4 for state in saved["optimizer"]["state"].values())

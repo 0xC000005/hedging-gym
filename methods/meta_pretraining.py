@@ -75,7 +75,8 @@ def _assign_first_order_gradients(policy, fast_policy, task, query_objective):
 def train_adapt_aware(policy, metadata, source_banks, *, seed=7, episodes=600,
                       inner_updates=5, batch_size=256, query_size=1024,
                       inner_lr=3e-4, outer_lr=1e-4, checkpoint_path=None,
-                      progress=True, resume_from=None):
+                      progress=True, resume_from=None,
+                      outer_loss="empirical_es", zeta_lr=3e-4):
     """Refine an existing TaskEmbeddedPolicy for post-adaptation terminal ES.
 
     Each round-robin episode clones the current initialization and source task
@@ -86,6 +87,12 @@ def train_adapt_aware(policy, metadata, source_banks, *, seed=7, episodes=600,
     With ``inner_updates=0``, ordinary continued multitask training instead
     samples from the entire source bank and uses no support or initialization
     rollouts. This control retains the architecture, query ES and outer Adam.
+    Its optional ``outer_loss="ru"`` uses the same source draws and policy
+    optimizer with one learned Rockafellar--Uryasev threshold per source.
+    Policy and threshold gradients are clipped separately at 5: otherwise a
+    scalar threshold gradient can rescale the policy gradient only in the RU
+    arm. This standardized comparison differs from the original multitask
+    trainer's joint clipping; it is not an exact continuation of that recipe.
 
     Checkpoints after each complete metaepisode include outer Adam, both index
     RNGs, global RNG, task position, history and accumulated work/time. Resume
@@ -99,6 +106,10 @@ def train_adapt_aware(policy, metadata, source_banks, *, seed=7, episodes=600,
     if (len(banks) < 2 or min(episodes, batch_size, query_size) < 1 or inner_updates < 0
             or min(inner_lr, outer_lr) <= 0):
         raise ValueError("at least two banks and positive work counts/learning rates required")
+    if outer_loss not in ("empirical_es", "ru") or (outer_loss == "ru" and inner_updates):
+        raise ValueError("RU outer loss is available only for ordinary (inner_updates=0) training")
+    if outer_loss == "ru" and zeta_lr <= 0:
+        raise ValueError("RU threshold learning rate must be positive")
     config = banks[0].config
     _continuous_contract(config)
     for bank in banks:
@@ -117,10 +128,17 @@ def train_adapt_aware(policy, metadata, source_banks, *, seed=7, episodes=600,
         raise ValueError("query_size cannot exceed a source's independent query half")
     method = METHOD if inner_updates else "query_es_dh"
     recipe = "first_order_post_adaptation_es" if inner_updates else "ordinary_query_es_continuation"
+    if outer_loss == "ru":
+        method, recipe = "query_ru_dh", "ordinary_query_ru_continuation"
     options = dict(episodes=episodes, inner_updates=inner_updates, batch_size=batch_size,
         query_size=query_size, inner_lr=inner_lr, inner_zeta_lr=3e-4,
         outer_lr=outer_lr, gradient_clip=5., initialization_paths_per_episode=1024 if inner_updates else 0,
         recipe=recipe)
+    # Leave the default recipe unchanged so previous empirical-ES checkpoints
+    # retain their exact resume contract.
+    if outer_loss == "ru":
+        options.update(outer_loss=outer_loss, zeta_lr=zeta_lr, threshold_gradient_clip=5.,
+                       clipping="separate policy and source-threshold gradient norms")
     source_configs = [asdict(bank.config) for bank in banks]
     source_paths = [len(bank.spot) for bank in banks]
     for key, actual in (("source_configs", source_configs), ("source_paths", source_paths)):
@@ -133,10 +151,14 @@ def train_adapt_aware(policy, metadata, source_banks, *, seed=7, episodes=600,
     policy.embedding.requires_grad_(False)
     outer_parameters = [*policy.shared.parameters(), policy.source_embeddings]
     optimizer = torch.optim.Adam(outer_parameters, lr=outer_lr)
+    source_zetas = list(metadata.get("source_zetas", [metadata.get("zeta", 0.)]*len(banks)))
+    thresholds = None
+    if outer_loss == "ru":
+        thresholds = torch.nn.Parameter(parameter.new_tensor(source_zetas))
+        optimizer.add_param_group({"params": [thresholds], "lr": zeta_lr})
     support_generator = torch.Generator().manual_seed(seed+100003)
     query_generator = torch.Generator().manual_seed(seed+200003)
     history, completed, previous_seconds = [], 0, 0.
-    source_zetas = list(metadata.get("source_zetas", [metadata.get("zeta", 0.)]*len(banks)))
     if resume_from is not None:
         saved = load_checkpoint(resume_from, method=method, config=config)
         prior_options = {key: value for key, value in saved["options"].items() if key != "episodes"}
@@ -148,6 +170,9 @@ def train_adapt_aware(policy, metadata, source_banks, *, seed=7, episodes=600,
         if completed > episodes:
             raise ValueError("requested episodes precede the saved completed step")
         policy.load_state_dict(saved["policy"])
+        if thresholds is not None:
+            with torch.no_grad():
+                thresholds.copy_(saved["thresholds"].to(device))
         optimizer.load_state_dict(saved["optimizer"])
         support_generator.set_state(saved["support_rng"])
         query_generator.set_state(saved["query_rng"])
@@ -204,21 +229,39 @@ def train_adapt_aware(policy, metadata, source_banks, *, seed=7, episodes=600,
         # support and can use the whole original source bank.
         query_indices = torch.randperm(len(query.spot), generator=query_generator)[:query_size]
         query_losses = rollout(fast, bank_subset(query, query_indices.to(device)))["terminal_loss"]
-        objective = differentiable_empirical_es(query_losses, config.risk.alpha)
+        objective = (differentiable_empirical_es(query_losses, config.risk.alpha)
+                     if thresholds is None else config.risk.loss(query_losses, thresholds[task]).mean())
         optimizer.zero_grad(set_to_none=True)
+        if thresholds is not None:
+            # The threshold branch shares losses but does not backpropagate
+            # through the fast policy. Keep its norm out of policy clipping.
+            thresholds.grad = torch.autograd.grad(objective, thresholds, retain_graph=True)[0]
+            threshold_before_step = thresholds[task].detach().clone()
         _assign_first_order_gradients(policy, fast, task, objective)
         gradient_norm = torch.nn.utils.clip_grad_norm_(outer_parameters, 5., error_if_nonfinite=True)
+        if thresholds is not None:
+            torch.nn.utils.clip_grad_norm_([thresholds], 5., error_if_nonfinite=True)
         optimizer.step()
         if inner_updates:
             source_zetas[task] = float(updater.zeta.detach())
+        elif thresholds is not None:
+            source_zetas = thresholds.detach().cpu().tolist()
         if step == 1 or step % 20 == 0 or step == episodes:
             _sync(device)
             elapsed = previous_seconds+time.perf_counter()-started
             current_elapsed = time.perf_counter()-started
             record = dict(completed=step, total=episodes, task=task,
-                query_es=float(objective.detach()), outer_gradient_norm=float(gradient_norm),
+                query_es=float(objective.detach()) if thresholds is None else float(
+                    differentiable_empirical_es(query_losses.detach(), config.risk.alpha)),
+                outer_gradient_norm=float(gradient_norm),
                 elapsed_seconds=elapsed, eta_seconds=current_elapsed*(episodes-step)/(step-completed),
                 zeta=source_zetas[task])
+            if thresholds is not None:
+                detached_losses = query_losses.detach()
+                record.update(ru_objective=float(objective.detach()),
+                    ru_tail_fraction=float((detached_losses > threshold_before_step).double().mean()),
+                    ru_threshold_minus_batch_quantile=float(threshold_before_step
+                        - torch.quantile(detached_losses, config.risk.alpha)))
             history.append(record)
             if progress:
                 _report("meta_train_progress", method=method, **record)
@@ -231,7 +274,8 @@ def train_adapt_aware(policy, metadata, source_banks, *, seed=7, episodes=600,
                 query_rng=query_generator.get_state(), rng=rng_state(), history=history,
                 source_zetas=source_zetas, initial_metadata=initial_metadata,
                 training_seconds=previous_seconds+time.perf_counter()-started,
-                work=work_counts(step), donor_url=DONOR_URL, donor_commit=DONOR_COMMIT))
+                work=work_counts(step), donor_url=DONOR_URL, donor_commit=DONOR_COMMIT,
+                **({"thresholds": thresholds.detach()} if thresholds is not None else {})))
     policy.prepare_adaptation()
     policy.eval()
     _sync(device)
@@ -240,6 +284,7 @@ def train_adapt_aware(policy, metadata, source_banks, *, seed=7, episodes=600,
     result = deepcopy(initial_metadata)
     result.update(method=method,
         method_label=("First-order adaptation-aware Deep Hedging" if inner_updates
+                      else "Ordinary query-RU continued multitask Deep Hedging" if thresholds is not None
                       else "Ordinary query-ES continued multitask Deep Hedging"),
         classification=("Finance adaptation of first-order MAML, not author-code reproduction" if inner_updates
                         else "Ordinary continued multitask pretraining control; no within-episode adaptation"),
@@ -252,10 +297,14 @@ def train_adapt_aware(policy, metadata, source_banks, *, seed=7, episodes=600,
                 "cost-inclusive terminal ES on the unchanged common finance ledger",
                 "source task embeddings and disjoint financial support/query paths",
                 "one round-robin source task per outer step", "explicit detached gradient transfer"] if inner_updates
-                else ["continue original multitask policy with exact query ES and the matched outer Adam"]),
+                else ["continue original multitask policy with query RU and the matched outer Adam",
+                      "separate policy and threshold clipping rather than original joint clipping"]
+                if thresholds is not None else
+                ["continue original multitask policy with exact query ES and the matched outer Adam"]),
             seed=seed, options=options, work=work, history=history,
             training_seconds=additional_seconds, device=str(device),
             objective=("exact fractional empirical ES after all inner updates" if inner_updates
+                       else "Rockafellar--Uryasev loss with a learned threshold per source" if thresholds is not None
                        else "ordinary exact fractional empirical ES at the current source initialization"),
             gradient=("first-order identity-Jacobian approximation; no differentiation through Adam" if inner_updates
                       else "ordinary query-loss gradient without inner adaptation"),

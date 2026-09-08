@@ -140,3 +140,30 @@ Reconstruct the results and audit saved losses and representative cash paths:
 ```bash
 python -m experiments.summarize_adapt_aware --output /path/to/new-run --development /path/to/capacity-run
 ```
+
+## Attribute an improvement before adding another method
+
+`experiments.attribute_pretraining` compares ordinary source continuation with
+learned RU thresholds or direct empirical ES, at batch sizes 256 and 1,024.
+Every arm starts from the same original checkpoint. The runner saves a common
+1,950-update milestone and continues the smaller batches to 7,800 updates, so
+both batch sizes also receive the same total path work. Context selection uses
+the existing development calibration paths; evaluation never selects a context.
+
+```bash
+python -m experiments.attribute_pretraining run --source /path/to/original-run --development /path/to/capacity-run --output /path/to/attribution --loss ru --batch 256 --seed 7
+```
+
+Run both `ru` and `empirical_es`, both batch sizes, and seeds 7, 17, 29.
+Independent jobs can run concurrently; each saves resumable optimizer and RNG
+state. Repeat a command to resume. Use a separate directory for `--smoke` runs.
+
+```bash
+python -m experiments.attribute_pretraining summarize --development /path/to/capacity-run --output /path/to/attribution
+```
+
+The summary independently reconstructs ES and sampled cash accounting. Results
+describe development markets, not a final superiority test. Loss estimators are
+compared under a common continuation recipe, not the original learning rate and
+sampling recipe. Direct empirical ES does not use the old saved RU thresholds;
+only interpret threshold-tracking diagnostics for RU training and its initializer.
