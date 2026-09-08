@@ -15,6 +15,7 @@ outside it.
 | `model_free.py` | Quantile D4PG and EX-D4PG with a generalized-Pareto tail |
 | `sb3.py` | Stock SB3 algorithms through a thin batched VecEnv/action-coordinate adapter |
 | `adaptation.py` | Full-network fine-tuning and task-embedding adaptation |
+| `meta_pretraining.py` | First-order post-adaptation training, with a zero-inner-update ordinary control |
 | `alphazero.py` | Stochastic PUCT, learned policy/value and search-improvement training |
 | `hybrid.py` | Discrete HOLD/TRADE choices with pathwise sizing and categorical PPO |
 | `planning.py` | CEM root-action improvement, feedback rollouts and optional gradient refinement |

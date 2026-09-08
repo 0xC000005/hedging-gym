@@ -60,7 +60,7 @@ def prepare_banks(args):
 
 
 def matched_updater(policy, metadata, train, initial, zeta, *, mode, seed,
-                    batch_size=256, updates=10):
+                    batch_size=256, updates=10, learning_rate=1e-3):
     """Start both modes at the same policy, threshold and fresh Adam state.
 
     The general online updater recalibrates the threshold only when starting a
@@ -69,7 +69,7 @@ def matched_updater(policy, metadata, train, initial, zeta, *, mode, seed,
     """
     learner = deepcopy(policy)
     updater = AdaptationUpdater(learner, metadata=metadata, mode=mode, seed=seed,
-        updates=updates, batch_size=batch_size, progress=False)
+        updates=updates, batch_size=batch_size, learning_rate=learning_rate, progress=False)
     learner.active_task = None
     learner.source_embeddings.requires_grad_(False)  # Not used by the target policy.
     with torch.no_grad():
