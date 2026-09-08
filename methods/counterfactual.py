@@ -51,12 +51,16 @@ def _modes(probabilities, uniforms):
         probabilities.shape[-1] - 1)
 
 
-def _target(policy, observed, state, config, uniform=None, mode=None):
+def _target(policy, observed, state, config, uniform=None, mode=None, return_score=False):
+    logits = policy.discrete(observed) if mode is None or return_score else None
     if mode is None:
-        mode = _modes(policy.discrete(observed).softmax(-1), uniform)
+        mode = _modes(logits.softmax(-1), uniform)
     candidates = policy.candidates(observed, state.positions,
         config.execution.holding_lower, config.execution.holding_upper)
-    return candidates[torch.arange(len(observed), device=observed.device), mode]
+    target = candidates[torch.arange(len(observed), device=observed.device), mode]
+    if return_score:
+        return target, logits.log_softmax(-1).gather(-1, mode[:, None]).squeeze(-1)
+    return target
 
 
 @torch.no_grad()
@@ -69,6 +73,14 @@ def counterfactual_rollout(policy, bank, *, time_index, algorithm="all_mode",
     M for all_mode and 1 for sampled. Root uniforms are ignored when enumerating.
     No future holdings or observations are copied between branches.
     """
+    return _counterfactual_rollout(policy, bank, time_index=time_index, algorithm=algorithm,
+        generator=generator, uniforms=uniforms, retain_tape=retain_tape)
+
+
+def _counterfactual_rollout(policy, bank, *, time_index, algorithm="all_mode",
+                            generator=None, uniforms=None, retain_tape=False,
+                            live_history=False, retain_scores=False):
+    """Shared branching engine; joint updates retain history and sizing graphs."""
     config, batch = bank.config, len(bank.spot)
     if algorithm not in ("all_mode", "sampled") or not 0 <= time_index < config.n_steps:
         raise ValueError("choose all_mode/sampled and a decision date before expiry")
@@ -83,13 +95,18 @@ def counterfactual_rollout(policy, bank, *, time_index, algorithm="all_mode",
         raise ValueError("uniforms must be [batch,n_steps] values in [0,1)")
     env = TensorHedgingEnv(bank)
     observed = env.reset()
-    prefix = []
+    prefix, prefix_observed, prefix_scores = [], [], []
     for date in range(time_index):
-        target = _target(policy, observed, env.state, config, uniform=uniforms[:, date])
+        target = _target(policy, observed, env.state, config, uniform=uniforms[:, date],
+                         return_score=retain_scores)
+        if retain_scores:
+            target, score = target
+            prefix_observed.append(observed)
+            prefix_scores.append(score)
         if retain_tape:
             prefix.append(target.clone())
         observed, _, _, _, _ = env.step(target)
-    root_observed = observed.detach().clone()
+    root_observed = observed.clone() if live_history else observed.detach().clone()
     probabilities = policy.discrete(root_observed).softmax(-1)
     if algorithm == "all_mode":
         modes = torch.arange(policy.n_modes, device=observed.device).expand(batch, -1)
@@ -102,11 +119,15 @@ def counterfactual_rollout(policy, bank, *, time_index, algorithm="all_mode",
     branch.state = LedgerState(*(getattr(env.state, field.name).repeat_interleave(width, 0)
                                  for field in fields(LedgerState)))
     observed = root_observed.repeat_interleave(width, 0)
-    suffix = []
+    suffix, suffix_observed, suffix_scores = [], [], []
     for date in range(time_index, config.n_steps):
         target = _target(policy, observed, branch.state, config,
             mode=modes.reshape(-1) if date == time_index else None,
-            uniform=uniforms[:, date].repeat_interleave(width))
+            uniform=uniforms[:, date].repeat_interleave(width), return_score=retain_scores)
+        if retain_scores:
+            target, score = target
+            suffix_observed.append(observed)
+            suffix_scores.append(score)
         if retain_tape:
             suffix.append(target.clone())
         observed, _, _, _, result = branch.step(target)
@@ -119,6 +140,11 @@ def counterfactual_rollout(policy, bank, *, time_index, algorithm="all_mode",
         history = [value.repeat_interleave(width, 0) for value in prefix] + suffix
         output.update(positions=torch.stack(history, 1).reshape(batch, width, config.n_steps, config.n_assets),
                       uniforms=uniforms.clone())
+    if retain_scores:
+        observed_history = [value.repeat_interleave(width, 0) for value in prefix_observed] + suffix_observed
+        scores = [value.repeat_interleave(width, 0) for value in prefix_scores] + suffix_scores
+        output.update(histories=torch.stack(observed_history).reshape(config.n_steps, batch, width, -1),
+                      scores=torch.stack(scores).reshape(config.n_steps, batch, width))
     return output
 
 
