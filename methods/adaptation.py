@@ -88,13 +88,16 @@ def train_online_finetune(train_bank, **kwargs):
 def train_multitask(train_banks, *, seed=7, updates=8, batch_size=32,
                     hidden=(32, 32), embedding_dim=4, learning_rate=1e-3,
                     zeta_learning_rate=3e-4, device="cpu", progress=True,
-                    checkpoint_path=None, checkpoint_every=100, resume_from=None):
+                    checkpoint_path=None, checkpoint_every=100, resume_from=None,
+                    policy_class=TaskEmbeddedPolicy):
     """Jointly fit source tasks, then return an embedding-adaptable policy.
 
     ``updates`` is the total number of optimizer steps, not steps per market.
     Tasks are visited round-robin, with a separately fitted ES threshold per
     task. Returned evaluation behavior uses the mean learned source embedding.
-    Source configurations and work counts are retained in metadata.
+    Source configurations and work counts are retained in metadata. A context
+    policy factory can replace the input-embedding architecture while keeping
+    the source banks, optimizer and risk objective identical.
     """
     banks = tuple(train_banks)
     if len(banks) < 2 or updates < len(banks) or batch_size < 1:
@@ -109,8 +112,9 @@ def train_multitask(train_banks, *, seed=7, updates=8, batch_size=32,
     device = torch.device(device)
     started = time.perf_counter()
     torch.manual_seed(seed)
-    policy = TaskEmbeddedPolicy(config, n_tasks=len(banks), embedding_dim=embedding_dim,
+    policy = policy_class(config, n_tasks=len(banks), embedding_dim=embedding_dim,
                                 hidden=hidden).to(device=device, dtype=banks[0].spot.dtype)
+    method_name = getattr(policy, "method_name", "adaptive_dh")
     for bank in banks:
         policy.check_config(bank.config)
     banks = tuple(bank_to(bank, device) for bank in banks)
@@ -122,8 +126,10 @@ def train_multitask(train_banks, *, seed=7, updates=8, batch_size=32,
     options = dict(updates=updates, batch_size=batch_size, hidden=list(hidden),
                    embedding_dim=embedding_dim, learning_rate=learning_rate,
                    zeta_learning_rate=zeta_learning_rate)
+    if type(policy) is not TaskEmbeddedPolicy:
+        options["policy_class"] = type(policy).__name__
     if progress:
-        _report("train_start", method="adaptive_dh", seed=seed, device=str(device),
+        _report("train_start", method=method_name, seed=seed, device=str(device),
                 workers=torch.get_num_threads(), source_markets=[asdict(b.config.market) for b in banks],
                 options=options, expected_episode_rollouts=updates*batch_size,
                 initialization_paths=sum(min(1024, len(b.spot)) for b in banks))
@@ -131,7 +137,7 @@ def train_multitask(train_banks, *, seed=7, updates=8, batch_size=32,
     history, completed, prior_seconds = [], 0, 0.
     source_configs = [asdict(bank.config) for bank in banks]
     if resume_from is not None:
-        saved = load_checkpoint(resume_from, method="adaptive_dh", config=config)
+        saved = load_checkpoint(resume_from, method=method_name, config=config)
         check_resume_options(saved, options)
         if (saved["seed"] != seed or saved["source_configs"] != source_configs
                 or saved["source_paths"] != [len(bank.spot) for bank in banks]):
@@ -174,9 +180,9 @@ def train_multitask(train_banks, *, seed=7, updates=8, batch_size=32,
                           eta_seconds=elapsed*(updates-step)/step, zeta=float(zeta[task].detach()))
             history.append(record)
             if progress:
-                _report("train_progress", method="adaptive_dh", **record)
+                _report("train_progress", method=method_name, **record)
         if checkpoint_path is not None and due_checkpoint(step, updates, checkpoint_every):
-            save_checkpoint(checkpoint_path, dict(method="adaptive_dh", phase="pretraining",
+            save_checkpoint(checkpoint_path, dict(method=method_name, phase="pretraining",
                 step=step, seed=seed, config=asdict(config), source_configs=source_configs,
                 source_paths=[len(bank.spot) for bank in banks], options=options,
                 policy=policy.state_dict(), zeta=zeta.detach(), optimizer=optimizer.state_dict(),
@@ -186,7 +192,8 @@ def train_multitask(train_banks, *, seed=7, updates=8, batch_size=32,
     _sync(device)
     # This mean initializes the optimizer's auxiliary threshold; it is not a
     # claim that the mixture's VaR is the average source-task VaR.
-    metadata = dict(method="adaptive_dh", method_label="Task-embedding adaptive Deep Hedging",
+    metadata = dict(method=method_name, method_label=getattr(policy, "method_label", "Task-embedding adaptive Deep Hedging"),
+        policy_class=type(policy).__name__,
         classification="Common-benchmark adaptation, not paper reproduction",
         source="https://arxiv.org/html/2504.16436v1#S2.SS2",
         source_changes=["cost-inclusive ES replaces squared error", "common causal observations",
@@ -284,7 +291,7 @@ class AdaptationUpdater:
             {"params": [self.zeta], "lr": self.zeta_learning_rate},
         ])
 
-    def __call__(self, training_bank):
+    def __call__(self, training_bank, *, initial_embedding=None):
         config = training_bank.config
         self.policy.check_config(config)
         _continuous_contract(config)
@@ -298,6 +305,11 @@ class AdaptationUpdater:
         initialization_paths = 0
         if reset:
             self.policy.reset_embedding()
+            # Retrieval or a context encoder may supply an initialization using
+            # current training data. It must not be erased by the mean restart.
+            if initial_embedding is not None:
+                with torch.no_grad():
+                    self.policy.embedding.copy_(initial_embedding)
             self._new_optimizer()
             initialization_paths = min(1024, len(bank.spot))
             with torch.no_grad():
