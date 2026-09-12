@@ -13,6 +13,11 @@ its PDE experiments or evidence of improved financial performance.
   shared context across layers: `geps/model/networks.py`, `MLP`, lines 7--32.
 - The donor checkout stays outside this repository. Set `GEPS_DONOR_ROOT` to
   that checkout when running source-parity tests.
+- Checkout retained outside Git at
+  `/home/max/Documents/hedging-gym-runs/r2-fast-adaptation-2026-09-08-DChV47/donors/geps`.
+  No donor package is installed. The pinned repository has no tracked license
+  file; this adapter independently expresses the published equations and does
+  not vendor the author's source.
 
 ## Mechanism and integration
 
@@ -70,3 +75,12 @@ source-dependent test is skipped.
 
 These checks qualify equations and integration; financial performance is
 measured separately by `experiments.compare_fast_adaptation`.
+These checks qualify equations and integration, not native PDE performance or
+financial superiority. No full training belongs to this implementation gate.
+
+On 2026-09-08, the source-dependent tests and existing adaptation tests passed:
+`8 passed`, using the existing hedging-gym virtualenv, CPU, two OpenMP/MKL
+threads, the worktree's `src` and root on `PYTHONPATH`, and the checkout above
+as `GEPS_DONOR_ROOT`. Command: `python -m pytest -q tests/test_geps.py
+tests/test_adaptation_methods.py`. The ledger test uses only two tiny updates;
+no scientific training or GPU job was run for this gate.
