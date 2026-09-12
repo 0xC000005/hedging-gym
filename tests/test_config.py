@@ -5,10 +5,31 @@ import pytest
 import torch
 
 from hedging_gym import (
-    BatesConfig, EuropeanOption, ExecutionConfig, GBMConfig, HestonConfig,
-    PortfolioConfig, TimeGrid, benchmark_config, config_from_dict, operational_config,
+    BatesConfig,
+    EuropeanOption,
+    ExecutionConfig,
+    GBMConfig,
+    HestonConfig,
+    PortfolioConfig,
+    RiskConfig,
+    TimeGrid,
+    benchmark_config,
+    config_from_dict,
+    operational_config,
 )
-from hedging_gym import finance
+from hedging_gym.environment import finance
+
+
+def test_mse_objective_roundtrip_value_and_gradient():
+    config = benchmark_config(risk=RiskConfig(objective="mse"))
+    restored = config_from_dict(asdict(config))
+    assert restored == config
+    losses = torch.tensor([-2., 0., 3.], requires_grad=True)
+    value = restored.risk.loss(losses).mean()
+    torch.testing.assert_close(value, torch.tensor(13./3))
+    value.backward()
+    torch.testing.assert_close(losses.grad, torch.tensor([-4./3, 0., 2.]))
+    torch.testing.assert_close(restored.risk.reward(losses), -losses.square())
 
 
 def test_model_identity_and_market_only_simulation():
@@ -21,6 +42,16 @@ def test_model_identity_and_market_only_simulation():
     spot, variance = finance.simulate_market_paths(GBMConfig(), TimeGrid(n_steps=252), 2, 11)
     assert spot.shape == variance.shape == (2, 253)
     assert torch.isfinite(spot).all() and (spot > 0).all()
+
+
+def test_source_market_defaults_and_explicit_saved_parameters():
+    heston = benchmark_config().market
+    assert (heston.v0, heston.kappa, heston.theta, heston.sigma, heston.rho) == (.04, 1., .04, 2., -.7)
+    assert benchmark_config(model="gbm").market == GBMConfig(v0=.09, mu=0.)
+    # Saved banks/checkpoints carry explicit coefficients, not today's defaults.
+    legacy = benchmark_config(model=HestonConfig(kappa=3., sigma=.3, rho=-.5))
+    assert config_from_dict(asdict(legacy)) == legacy
+    assert config_from_dict(asdict(legacy)).market != heston
 
 
 def test_execution_broadcast_and_schema_do_not_depend_on_construction_order():

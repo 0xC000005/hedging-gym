@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "hedging-gym"
 version = "0.1.0a1"
-description = "CPU/GPU-batched Gymnasium hedging environment with independent financial validation"
+description = "Batched hedging environment, baseline methods and paper benchmarks"
 readme = "README.md"
 requires-python = ">=3.12,<3.14"
 dependencies = [
@@ -15,14 +15,18 @@ dependencies = [
     "gymnasium==1.2.3",
 ]
 
+[project.optional-dependencies]
+baselines = ["stable-baselines3==2.9.0", "sb3-contrib==2.9.0", "tqdm==4.67.1"]
+
 [dependency-groups]
 dev = ["pytest==9.1.1"]
+baselines = ["hedging-gym[baselines]"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/hedging_gym"]
 
 [tool.hatch.build.targets.sdist]
-include = ["src", "methods", "experiments", "tests", "docs", "README.md", "AGENTS.md", ".python-version", "pyproject.toml", "uv.lock"]
+include = ["src", "benchmarks", "tests", "docs", "README.md", "AGENTS.md", ".python-version", "pyproject.toml", "uv.lock"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

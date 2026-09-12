@@ -12,10 +12,10 @@ import numpy as np
 import torch
 from gymnasium.utils.env_checker import check_env
 
-from . import finance
-from .benchmark import benchmark_config, operational_config
+from .environment import finance
+from .environment.benchmark import benchmark_config, operational_config
 from .evaluation import evaluate_controller
-from .gym_env import HedgingEnv
+from .environment.gym_env import HedgingEnv
 
 
 def scripted_targets(observed, ledger, time_index, config):

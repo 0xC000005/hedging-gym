@@ -2,12 +2,13 @@
 
 The public API shares one financial implementation across all methods.
 """
-from .config import (
+from .environment.config import (
     GBMConfig, HestonConfig, BatesConfig, TimeGrid, EuropeanOption, PortfolioConfig,
-    ExecutionConfig, RiskConfig, HedgingConfig, config_from_dict,
+    ExecutionConfig, RiskConfig, SettlementConfig, HedgingConfig, config_from_dict,
 )
-from .gym_env import HedgingEnv, HedgingVectorEnv, TensorHedgingEnv
-from .benchmark import benchmark_config, operational_config, adaptation_configs, evaluate_adaptation
+from .environment.gym_env import HedgingEnv, HedgingVectorEnv, TensorHedgingEnv
+from .environment.instruments import Instrument, VarianceSwap, register_instrument
+from .environment.benchmark import benchmark_config, operational_config, adaptation_configs, evaluate_adaptation
 from .evaluation import evaluate_controller, empirical_es
 
 __all__ = [
@@ -15,5 +16,5 @@ __all__ = [
     "TensorHedgingEnv", "benchmark_config", "operational_config", "adaptation_configs",
     "evaluate_adaptation", "evaluate_controller", "empirical_es", "TimeGrid",
     "EuropeanOption", "PortfolioConfig", "ExecutionConfig", "RiskConfig", "HedgingConfig",
-    "config_from_dict",
+    "config_from_dict", "Instrument", "VarianceSwap", "register_instrument", "SettlementConfig",
 ]

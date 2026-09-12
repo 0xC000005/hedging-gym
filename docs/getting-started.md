@@ -118,7 +118,7 @@ For evaluation without a Gym loop, pass a controller and a generated bank:
 ```python
 import torch
 from hedging_gym import benchmark_config, evaluate_controller
-from hedging_gym.finance import generate_market_bank
+from hedging_gym.environment.finance import generate_market_bank
 
 config = benchmark_config(model="gbm")
 bank = generate_market_bank(config, n_paths=64, seed=42)
@@ -141,11 +141,12 @@ actual holdings, terminal losses and execution costs for cash reconstruction.
 For a learned comparison, use separate training and evaluation paths and pool
 complete losses when calculating ES; minibatch ES values cannot be averaged.
 
-The trainable baseline example is a separate checkout command:
+Baseline modules are installed under `hedging_gym.baselines`. Run the comparison
+entry point from a checkout:
 
 ```bash
-uv run --frozen python -m experiments.baselines
+uv run --frozen python -m benchmarks.baselines
 ```
 
-Read the [method guide](../methods/README.md) before interpreting its results or
+Read the [baseline guide](baselines.md) before interpreting its results or
 selecting execution rules for a continuous policy.

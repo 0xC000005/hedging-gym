@@ -1,15 +1,16 @@
 """Shared market interfaces and bounded numerical checks; no distribution certificate."""
 
-from dataclasses import asdict
 import math
+from dataclasses import asdict
 
 import numpy as np
 import pytest
 import torch
 
-from hedging_gym import finance, benchmark_config, TimeGrid, ExecutionConfig, config_from_dict
-from hedging_gym.config import market_from_dict
-from hedging_gym.gym_env import HedgingVectorEnv
+from hedging_gym import ExecutionConfig, TimeGrid, benchmark_config, config_from_dict
+from hedging_gym.environment import finance
+from hedging_gym.environment.config import market_from_dict
+from hedging_gym.environment.gym_env import HedgingVectorEnv
 
 
 def quantlib_price(model, spot, variance, days, strike, config, *, tolerance=1e-10, max_evaluations=10000):

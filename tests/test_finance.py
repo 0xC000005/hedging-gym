@@ -4,8 +4,17 @@ import numpy as np
 import pytest
 import torch
 
-from hedging_gym import (finance, benchmark_config, GBMConfig, HestonConfig, BatesConfig, TimeGrid,
-                         PortfolioConfig, EuropeanOption, ExecutionConfig)
+from hedging_gym import (
+    BatesConfig,
+    EuropeanOption,
+    ExecutionConfig,
+    GBMConfig,
+    HestonConfig,
+    PortfolioConfig,
+    TimeGrid,
+    benchmark_config,
+)
+from hedging_gym.environment import finance
 
 
 @pytest.mark.parametrize("market", [GBMConfig(), HestonConfig(), BatesConfig()])
@@ -19,7 +28,8 @@ def test_shared_numpy_shocks_match_tensor_transitions(market):
 
 
 def test_small_float32_put_matches_quantlib_and_both_initial_ledgers():
-    market, grid = GBMConfig(spot0=100.), TimeGrid(n_steps=5)
+    # Preserve the low-premium regression's original 20% volatility.
+    market, grid = GBMConfig(spot0=100., v0=.04), TimeGrid(n_steps=5)
     contract = EuropeanOption(90., grid.horizon, "put")
     spot = torch.tensor(market.spot0, requires_grad=True)
     price = finance.option_price(spot, market.v0, contract.maturity, contract.strike, market, kind="put")

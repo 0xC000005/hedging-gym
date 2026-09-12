@@ -10,10 +10,10 @@ import time
 
 import torch
 
-from .benchmark import adaptation_configs, benchmark_config, operational_config
-from .config import RiskConfig, TimeGrid
+from .environment.benchmark import adaptation_configs, benchmark_config, operational_config
+from .environment.config import RiskConfig, TimeGrid
 from .evaluation import empirical_es
-from .gym_env import HedgingVectorEnv
+from .environment.gym_env import HedgingVectorEnv
 
 
 def run(device="cpu", paths=64, *, model="heston", n_steps=30,

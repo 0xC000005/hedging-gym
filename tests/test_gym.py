@@ -7,11 +7,37 @@ from gymnasium.utils.env_checker import check_env
 from gymnasium.vector import AutoresetMode, VectorEnv
 from gymnasium.wrappers.vector import RecordEpisodeStatistics
 
-from hedging_gym import finance, gym_env
-from hedging_gym.benchmark import benchmark_config
-from hedging_gym.config import ExecutionConfig, RiskConfig, TimeGrid
+from hedging_gym.environment import finance, gym_env
+from hedging_gym.environment.benchmark import benchmark_config
+from hedging_gym.environment.config import ExecutionConfig, RiskConfig, TimeGrid
+from hedging_gym.environment.gym_env import (
+    HedgingEnv,
+    HedgingVectorEnv,
+    TensorHedgingEnv,
+)
 from hedging_gym.evaluation import evaluate_controller
-from hedging_gym.gym_env import HedgingEnv, HedgingVectorEnv, TensorHedgingEnv
+
+
+@pytest.mark.parametrize("interface", ["tensor", "single", "vector"])
+def test_mse_configuration_controls_terminal_reward(interface):
+    config = benchmark_config(model="gbm", time_grid=TimeGrid(n_steps=2),
+                              risk=RiskConfig(objective="mse"))
+    if interface == "tensor":
+        bank = finance.generate_market_bank(config, 2, 809)
+        env = TensorHedgingEnv(bank)
+        env.reset()
+        action = torch.zeros((2, config.n_assets))
+    else:
+        env = HedgingEnv(config) if interface == "single" else HedgingVectorEnv(2, config)
+        env.reset(seed=809)
+        action = np.zeros(env.action_space.shape, dtype=np.float32)
+    for date in range(config.n_steps):
+        _, reward, _, _, info = env.step(action)
+        if date < config.n_steps-1:
+            assert np.all(np.asarray(reward) == 0)
+    np.testing.assert_allclose(reward, -np.asarray(info["terminal_loss"])**2, atol=1e-10)
+    if interface != "tensor":
+        env.close()
 
 
 def test_tensor_terminal_accounting_and_gradients_match_independent_cash():
@@ -160,6 +186,8 @@ def test_evaluator_uses_configured_risk_and_keeps_fixed_tail_diagnostics():
         return torch.zeros_like(ledger.positions)
     metrics, tape = evaluate_controller(controller, bank, batch_size=2, zeta=-.02)
     losses = tape["terminal_loss"].numpy()
+    assert metrics["mse"] == pytest.approx(np.mean(losses**2))
+    assert metrics["rmse"] == pytest.approx(np.sqrt(np.mean(losses**2)))
     assert metrics["risk_alpha"] == .6
     # Five paths leave two complete observations in the upper 40% tail.
     assert metrics["expected_shortfall"] == pytest.approx(np.sort(losses)[-2:].mean())

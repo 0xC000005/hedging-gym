@@ -1,0 +1,23 @@
+{
+  "market": {
+    "model": "heston",
+    "scheme": "qe_m",
+    "spot0": 100.0,
+    "v0": 0.04,
+    "r": 0.0,
+    "q": 0.0,
+    "kappa": 1.0,
+    "theta": 0.04,
+    "sigma": 2.0,
+    "rho": -0.7
+  },
+  "time_grid": {"n_steps": 30, "days_per_year": 365},
+  "portfolio": {
+    "liability": {"strike": 100.0, "maturity": 0.0821917808219178, "kind": "call"},
+    "hedges": [{"kind": "variance_swap", "maturity": 0.0821917808219178}],
+    "liability_quantity": 1.0
+  },
+  "execution": {"holding_lower": null, "holding_upper": null},
+  "risk": {"alpha": 0.5, "objective": "es"},
+  "settlement": {"mode": "liquidate", "charge_liquidation_costs": false}
+}

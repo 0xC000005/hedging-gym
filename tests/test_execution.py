@@ -6,9 +6,14 @@ import numpy as np
 import pytest
 import torch
 
-from hedging_gym import finance, benchmark_config, TimeGrid, ExecutionConfig
+from hedging_gym import ExecutionConfig, TimeGrid, benchmark_config
+from hedging_gym.environment import finance
+from hedging_gym.environment.gym_env import (
+    HedgingEnv,
+    HedgingVectorEnv,
+    TensorHedgingEnv,
+)
 from hedging_gym.evaluation import empirical_es, evaluate_controller
-from hedging_gym.gym_env import HedgingEnv, HedgingVectorEnv, TensorHedgingEnv
 
 
 def execution_config():

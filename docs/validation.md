@@ -41,10 +41,31 @@ observations reflect the documented interface conventions.
 ## Numerical scope
 
 GBM uses exact conditional lognormal stock steps at constant variance. Heston
-uses an approximate quadratic-exponential variance and log-spot step; Bates adds
-compensated compound-Poisson lognormal jumps to that diffusion. Refining internal
-substeps changes numerical resolution while preserving the decision grid.
-Neither Heston nor Bates is exact joint-path simulation.
+defaults to QE-M (`scheme="qe_m"`), with the conditional stock martingale
+correction from [QuantLib 1.43's Heston process](https://github.com/lballabio/QuantLib/blob/v1.43/ql/processes/hestonprocess.cpp).
+Plain QE remains available as `scheme="qe"`. Bates adds compensated
+compound-Poisson lognormal jumps to the selected Heston diffusion. Refining
+internal substeps changes numerical resolution while preserving the decision
+grid. Both schemes are approximate; the martingale correction does not make
+Heston or Bates exact joint-path simulation.
+
+Run the scheme-specific checks with:
+
+```bash
+uv run --frozen pytest -q tests/test_heston_schemes.py
+```
+
+QuantLib parity must select the same scheme: `QuadraticExponential` for QE or
+`QuadraticExponentialMartingale` for QE-M. Agreement on fixed-input transitions
+does not establish path-distribution convergence or policy tail-risk precision.
+
+For option pricing, high volatility-of-variance requires a longer Fourier tail
+than a cutoff based only on average variance. The tensor pricer uses the
+asymptotic decay scale from [QuantLib 1.43's Heston engine](https://github.com/lballabio/QuantLib/blob/v1.43/ql/pricingengines/vanilla/analytichestonengine.cpp)
+to extend its integration range. Price checks cover the source-matched Heston
+defaults at short maturities and near-zero variance; an ATM delta is checked
+separately. These checks do not establish path-distribution convergence, which
+requires separate simulation-refinement checks before comparing training results.
 
 **Bates tail-risk precision remains incomplete.** The automated suite does not
 establish distributional convergence of Heston/Bates paths or policy tail losses.

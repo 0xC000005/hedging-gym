@@ -6,20 +6,39 @@ import numpy as np
 import pytest
 import torch
 
+from hedging_gym.baselines._shared.controllers import policy_controller
+from hedging_gym.baselines._shared.training import rollout
+from hedging_gym.baselines.deep_hedging import DirectDHPolicy
+from hedging_gym.baselines.deep_hedging import train as train_dh
+from hedging_gym.baselines.delta import make_controller as delta_controller
+from hedging_gym.baselines.delta import spot_delta
+from hedging_gym.baselines.delta_gamma import make_controller as delta_gamma_controller
+from hedging_gym.baselines.delta_gamma import spot_gamma_greeks
+from hedging_gym.baselines.delta_variance import (
+    make_controller as delta_variance_controller,
+)
+from hedging_gym.baselines.delta_variance import spot_variance_greeks
+from hedging_gym.baselines.no_transaction_band import NoTransactionBandPolicy
+from hedging_gym.baselines.no_transaction_band import train as train_ntb
+from hedging_gym.environment.benchmark import benchmark_config
+from hedging_gym.environment.config import (
+    EuropeanOption,
+    ExecutionConfig,
+    GBMConfig,
+    HedgingConfig,
+    PortfolioConfig,
+    RiskConfig,
+    TimeGrid,
+)
+from hedging_gym.environment.finance import (
+    generate_market_bank,
+    instrument_names,
+    numpy_ledger,
+    observation_fields,
+)
+from hedging_gym.environment.gym_env import HedgingVectorEnv
+from hedging_gym.environment.rollout import run_episode
 from hedging_gym.evaluation import evaluate_controller
-from hedging_gym.benchmark import benchmark_config
-from hedging_gym.config import (
-    EuropeanOption, ExecutionConfig, GBMConfig, HedgingConfig, PortfolioConfig,
-    RiskConfig, TimeGrid,
-)
-from hedging_gym.finance import (
-    generate_market_bank, numpy_ledger, observation_fields, instrument_names,
-)
-from hedging_gym.gym_env import HedgingVectorEnv
-from methods.classical import spot_delta, spot_gamma_greeks, spot_variance_greeks
-from methods.controllers import classical_controller, policy_controller
-from methods.policies import DirectDHPolicy, NoTransactionBandPolicy
-from methods.training import rollout, train_policy
 
 
 @pytest.fixture(scope="module")
@@ -32,7 +51,8 @@ def bank():
 def test_policy_terminal_gradient_and_evaluator_tape(bank, policy_class):
     torch.manual_seed(19)
     policy = policy_class(bank.config, hidden=(8,)).double()
-    output = rollout(policy, bank, record_positions=True)
+    output = run_episode(policy_controller(policy, evaluation=False), bank, record_positions=True)
+    assert policy.training  # The common runner must not switch off training mode.
     objective = output["terminal_loss"].mean()
     parameter = policy.continuous[-1].bias
     gradient, = torch.autograd.grad(objective, parameter)
@@ -63,7 +83,7 @@ def test_policy_terminal_gradient_and_evaluator_tape(bank, policy_class):
 def test_training_changes_policy_and_frozen_evaluation_is_finite(bank, method, policy_class):
     torch.manual_seed(7)
     initial = policy_class(bank.config, hidden=(8,)).double()
-    policy, metadata = train_policy(method, bank, seed=7, updates=3, batch_size=16,
+    policy, metadata = {'dh': train_dh, 'ntb': train_ntb}[method](bank, seed=7, updates=3, batch_size=16,
                                     hidden=(8,), progress=False)
     assert any(not torch.equal(before, after) for before, after in zip(initial.parameters(), policy.parameters()))
     assert metadata["history"][-1]["completed"] == 3
@@ -75,7 +95,7 @@ def test_training_changes_policy_and_frozen_evaluation_is_finite(bank, method, p
 
 @pytest.mark.parametrize("method", ["delta", "delta_gamma", "delta_variance"])
 def test_classical_controller_uses_common_evaluation_accounting(bank, method):
-    metrics, tape = evaluate_controller(classical_controller(method), bank, batch_size=7)
+    metrics, tape = evaluate_controller({'delta': delta_controller, 'delta_gamma': delta_gamma_controller, 'delta_variance': delta_variance_controller}[method](), bank, batch_size=7)
     reference = numpy_ledger(bank.marks.numpy(), tape["positions"].numpy(),
                              bank.liability[:, 0].numpy(), bank.liability[:, -1].numpy(), bank.config)
     np.testing.assert_allclose(tape["terminal_loss"].numpy(), reference["terminal_loss"], atol=1e-12)
@@ -86,7 +106,7 @@ def test_continuous_training_does_not_silently_project_lot_constraints(bank):
     constrained = replace(bank, config=replace(bank.config,
         execution=replace(bank.config.execution, trade_lot=.1)))
     with pytest.raises(ValueError, match="minimum-trade or lot"):
-        train_policy("dh", constrained, updates=1, progress=False)
+        train_dh(constrained, updates=1, progress=False)
 
 
 def _book(*, stock_only=False, quantity=1., liability_kind="put", alpha=.8):
@@ -157,7 +177,7 @@ def test_classical_put_liability_quantity_and_selected_put_hedge(quantity):
     bank = generate_market_bank(config, 3, 1103, dtype=torch.float64)
     for method, greek in (("delta_gamma", spot_gamma_greeks),
                           ("delta_variance", spot_variance_greeks)):
-        _, tape = evaluate_controller(classical_controller(method, hedge_index=1), bank)
+        _, tape = evaluate_controller({'delta': delta_controller, 'delta_gamma': delta_gamma_controller, 'delta_variance': delta_variance_controller}[method](hedge_index=1), bank)
         target = tape["positions"][:, 0]
         ds, sensitivity = greek(bank.spot[:, 0], bank.variance[:, 0], 0, config, hedge_index=1)
         assert (target[:, 1] == 0).all()
@@ -168,14 +188,14 @@ def test_classical_put_liability_quantity_and_selected_put_hedge(quantity):
 def test_stock_only_delta_uses_signed_put_liability():
     config = _book(stock_only=True, quantity=2.)
     bank = generate_market_bank(config, 4, 441, dtype=torch.float64)
-    _, tape = evaluate_controller(classical_controller("delta"), bank)
+    _, tape = evaluate_controller(delta_controller(), bank)
     assert tape["positions"].shape == (4, config.n_steps, 1)
     assert (tape["positions"] <= 0).all()
     reference = numpy_ledger(bank.marks.numpy(), tape["positions"].numpy(),
         bank.liability[:, 0].numpy(), bank.liability[:, -1].numpy(), config)
     np.testing.assert_allclose(tape["terminal_loss"].numpy(), reference["terminal_loss"], atol=1e-11)
     with pytest.raises(ValueError, match="available hedge option"):
-        evaluate_controller(classical_controller("delta_gamma"), bank)
+        evaluate_controller(delta_gamma_controller(), bank)
 
 
 @pytest.mark.parametrize("method", ["dh", "ntb"])
@@ -184,7 +204,7 @@ def test_training_initial_threshold_uses_configured_risk_confidence(method):
     bank = generate_market_bank(config, 24, 3301, dtype=torch.float64)
     # Negligible optimizer movement leaves the independently observed initial
     # median unchanged, exposing an accidentally hardcoded tail confidence.
-    policy, metadata = train_policy(method, bank, seed=19, updates=1, batch_size=16,
+    policy, metadata = {'dh': train_dh, 'ntb': train_ntb}[method](bank, seed=19, updates=1, batch_size=16,
         hidden=(8,), learning_rate=1e-30, zeta_learning_rate=1e-30, progress=False)
     initial_losses = rollout(policy, bank)["terminal_loss"].detach()
     assert metadata["zeta"] == pytest.approx(float(torch.quantile(initial_losses, .5)), abs=1e-12)

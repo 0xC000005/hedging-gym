@@ -1,11 +1,16 @@
 # Benchmark and financial contract
 
 The benchmark is a small, explicit experiment for comparing hedging methods
-under a common terminal-loss objective. Its parameters and execution charges
-are synthetic assumptions. They are not a market calibration or a claim that
-one method is best.
+under a common terminal-loss objective. Heston and GBM market defaults follow
+published research and its source code, as detailed below. Execution charges
+are synthetic assumptions, not market-calibrated estimates.
 
 ## Default experiment
+
+For published-task configurations rather than the common default below, see
+[Bühler Heston, AlphaZero Heston and AlphaZero GBM](paper-benchmarks.md).
+[Custom instruments and settlement](custom-instruments.md) explains how these
+tasks compose the same engine.
 
 `benchmark_config()` selects the following settings. Passing a component
 replaces that component; bare market configurations contain no portfolio or
@@ -16,7 +21,8 @@ including zero fees; use `operational_config` to deliberately overlay it later.
 | Component | Default |
 |---|---|
 | Market | Heston, with initial spot 1 and variance 0.04 |
-| Heston parameters | Mean reversion 3, long-run variance 0.04, volatility of variance 0.3, correlation −0.5 |
+| Heston parameters | Mean reversion 1, long-run variance 0.04, volatility of variance 2, correlation −0.7 |
+| Heston simulation | QE-M, the quadratic-exponential scheme with a conditional stock martingale correction |
 | Time grid | 30 decisions, one step per 1/252 year |
 | Liability | One ATM European call owed, settling after the last interval |
 | Hedge instruments | Stock and one ATM European call maturing at twice the episode horizon |
@@ -26,20 +32,73 @@ including zero fees; use `operational_config` to deliberately overlay it later.
 | Other execution charges | Zero |
 | Risk | Expected shortfall at confidence 0.95 |
 
-Choosing `model="gbm"` uses constant variance 0.04 and physical drift zero.
-Choosing `model="bates"` adds independent jumps to the Heston diffusion, with
-intensity 1 per year, normal log-jump mean −0.1 and standard deviation 0.2.
+Choosing `model="gbm"` uses constant variance 0.09 (30% volatility) and physical
+drift zero. Choosing `model="bates"` retains its separate synthetic diffusion
+settings: variance 0.04, mean reversion 3, long-run variance 0.04, volatility of
+variance 0.3 and correlation −0.5. It adds independent jumps with intensity 1
+per year, normal log-jump mean −0.1 and standard deviation 0.2.
 An explicit market object can change these parameters without changing the
 other components.
 
+`HestonConfig.scheme` accepts `"qe_m"` (the default) and `"qe"` (plain QE).
+`BatesConfig` inherits this choice for its diffusion component; GBM keeps its
+exact conditional lognormal step. The correction follows
+[QuantLib 1.43's QE-M implementation](https://github.com/lballabio/QuantLib/blob/v1.43/ql/processes/hestonprocess.cpp).
+Heston and Bates remain approximate numerical simulations.
+
+Current serialized configurations explicitly record the selected scheme.
+The baseline runner accepts `--scheme qe` for an explicit plain-QE comparison;
+new Heston/Bates runs default to QE-M. Current checkpoints must match their
+explicit configuration. Historical runs use archived source and artifacts,
+not a checkpoint migration layer. Compare methods on the same scheme, not
+across old and new score tables.
+
+### Where the market defaults come from
+
+The Heston coefficients match [Bühler et al., Deep Hedging, §5.2](https://arxiv.org/html/1802.03042v1#S5.SS2)
+and the [minimalHedger AlphaZero Heston environment](https://github.com/plan64/minimalHedger_AlphaZero/blob/3111c378fcd17e45f94d2fc668a3aa117126ecba/hedger_TV/hedgerGame_TV_heston.py).
+Spot is normalized to 1, as in that code, rather than the paper's 100.
+GBM's 30% volatility comes from the same repository's
+[GBM environment](https://github.com/plan64/minimalHedger_AlphaZero/blob/3111c378fcd17e45f94d2fc668a3aa117126ecba/hedger_TV/hedgerGame_TV_pureGBMPaths.py).
+
+These are market-parameter matches, not complete reproductions: our common
+portfolio, 252-day clock, costs and ES95 objective remain as listed above.
+The paper uses a variance-swap hedge and a 365-day clock; the AlphaZero donor
+uses stock-only hedging and a different loss. Previously saved experiments
+retain their explicit market settings; changing defaults does not revalidate
+or relabel their results.
+
+`RiskConfig(objective="mse")` selects terminal MSE (`mean(L²)`). It is serialized
+with the other components, so the same JSON config works with the scalar,
+vector and tensor environments. All three return zero intermediate rewards and
+negative squared loss at settlement. Differentiable learners can average
+`config.risk.loss(terminal_losses)` directly. The evaluator reports MSE, RMSE,
+ES and the configured `objective_value` from pooled terminal losses.
+
+The default `RiskConfig(objective="es", alpha=.95)` keeps the original contract:
+Gym returns terminal P&L until the learner supplies a global `risk_threshold`,
+then negative Rockafellar–Uryasev loss. The learner estimates the threshold;
+the environment does not estimate a tail from one path. MSE and ES are
+alternative objectives. Comparisons must train every method for the chosen
+objective; existing ES checkpoints do not become MSE-trained checkpoints.
+
+The [source AlphaZero experiment](source-alphazero.md) includes stock-only GBM
+and Heston JSON configurations with MSE and a 365-day clock. These choose the
+market, book, calendar and objective independently.
+
 For a custom time grid, the default liability matures at `time_grid.horizon`
 and the default hedge at twice that horizon. Custom portfolios may use European
-calls or puts, any number of hedge options including zero, and a signed
+calls/puts, a variance swap or user-defined priced instruments, and a signed
 liability quantity. Positive liability quantity is owed; negative quantity is
-owned. Hedge positions count options with unit underlying multiplier. Cash is
+owned. Hedge positions count units of the selected contract. Cash is
 accounted separately and is not an action-space instrument.
 
 ## Cash, trades and loss
+
+The equations below describe the default zero-inventory, trade-before-maturity,
+paid-liquidation convention. Initial endowments, a maturity-date action and
+mark-to-market settlement are independently configurable as described in
+[custom instruments and settlement](custom-instruments.md).
 
 Let decisions occur at $t_i=i\Delta t$, $i=0,\ldots,N-1$, with settlement at
 $T=t_N$. Let $M_i$ be the vector of stock and hedge-option mid-prices, and $h_i$
@@ -145,8 +204,8 @@ path values. Their schema depends on the chosen market and portfolio. All
 controllers must derive their dimensions from that schema. Internal simulation
 substeps refine the market integrator without adding trading decisions.
 
-`hedging_gym.finance.observation_fields(config)` lists columns in their exact
-order. Instrument blocks follow stock, then `portfolio.hedges`.
+`hedging_gym.environment.finance.observation_fields(config)` lists columns in
+their exact order. Instrument blocks follow stock, then `portfolio.hedges`.
 
 | Observation fields | Values supplied to the controller |
 |---|---|
@@ -188,8 +247,10 @@ base = operational_config(base, name="operational_fixed")
 stages = adaptation_configs(base)
 ```
 
-The default stages are A → B → A. B changes initial variance from 0.04 to 0.09
-and, for Heston/Bates, long-run variance to 0.09. Explicit `market_changes` may
+The default stages are A → B → A. B scales initial volatility by 1.5 (variance
+by 2.25), and likewise long-run volatility for Heston/Bates. This changes
+variance from 0.04 to 0.09 for default Heston/Bates, and from 0.09 to 0.2025
+for default GBM. Explicit `market_changes` may
 change stochastic parameters within the selected model family. Portfolio,
 calendar, execution and risk stay fixed. Regimes change observably between
 independent episodes.
