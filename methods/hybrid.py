@@ -123,6 +123,7 @@ def train_hybrid(train_bank, *, seed=7, updates=8, batch_size=32, hidden=(32, 32
         _report("train_start", method="hpo", seed=seed, device=str(device), options=options,
                 expected_episode_rollouts=updates * batch_size, n_modes=policy.n_modes)
     first_step, previous_seconds, history = 0, 0., []
+    new_ppo_extra_updates = 0
     if resume_from:
         saved = load_checkpoint(resume_from, method="hpo", config=config)
         check_resume_options(saved, options)
@@ -185,6 +186,7 @@ def train_hybrid(train_bank, *, seed=7, updates=8, batch_size=32, hidden=(32, 32
             threshold_optimizer.zero_grad(set_to_none=True)
             threshold_loss.backward()
             threshold_optimizer.step()
+        new_ppo_extra_updates += extra_epochs
         with torch.no_grad():
             policy.zeta.copy_(zeta)
         if update == 1 or update % 20 == 0 or update == updates:
@@ -208,6 +210,8 @@ def train_hybrid(train_bank, *, seed=7, updates=8, batch_size=32, hidden=(32, 32
     return policy, dict(method="hpo", seed=seed, device=str(device), options=options,
         zeta=float(zeta.detach()), history=history, total_seconds=previous_seconds+time.perf_counter() - started,
         resumed_from=str(resume_from) if resume_from else None, resumed_step=first_step,
+        new_rollout_updates=updates-first_step, new_ppo_extra_updates=new_ppo_extra_updates,
+        new_policy_optimizer_updates=updates-first_step+new_ppo_extra_updates,
         expected_episode_rollouts=updates * batch_size, initialization_paths=min(1024, len(bank.spot)),
         source="MatiasAlvo/hybrid-rl@e48ae86da1e8f14c93cbb56e48d87f8674228659",
         scope="HPO estimator/PPO adaptation; complete-return ES, not native LQR reproduction",

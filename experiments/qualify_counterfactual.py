@@ -8,6 +8,7 @@ evidence. Runtime, branch work and threshold preparation are reported separately
 import argparse
 from dataclasses import asdict
 import json
+import math
 from pathlib import Path
 import time
 
@@ -17,8 +18,9 @@ from hedging_gym.evaluation import evaluate_controller
 from methods.checkpoints import load_checkpoint
 from methods.controllers import policy_controller
 from methods.counterfactual import train_counterfactual
-from methods.hybrid import HybridPolicy
-from methods.training import _report
+from methods.hybrid import HybridPolicy, train_hybrid
+from methods.joint_counterfactual import train_joint_counterfactual
+from methods.training import _report, train_policy, POLICIES
 from experiments.qualify_policies import load_bank
 
 
@@ -28,7 +30,7 @@ def sampled_controller(policy):
         policy.check_config(config)
         return policy(observed, ledger.positions, config.execution.holding_lower,
                       config.execution.holding_upper, deterministic=False).target_holdings
-    control.action_selection = "sampled categorical modes; frozen conditional sizes"
+    control.action_selection = "sampled categorical modes; deterministic conditional sizes"
     return control
 
 
@@ -50,6 +52,10 @@ def main():
     parser.add_argument("--learning-rate", type=float, default=3e-4)
     parser.add_argument("--threads", type=int, default=2)
     parser.add_argument("--evaluation-batch-size", type=int, default=1024)
+    parser.add_argument("--joint", action="store_true", help="restore continuous and live-history gradients")
+    parser.add_argument("--score-scope", choices=("sampled_date", "trajectory"), default="trajectory")
+    parser.add_argument("--full-hpo", action="store_true", help="continue full HPO at matched additional ledger work")
+    parser.add_argument("--continue-control", action="store_true", help="continue DH/basic or bands/fixed at matched ledger work")
     args = parser.parse_args()
     torch.set_num_threads(args.threads)
     source, output = args.source_dir.resolve(), args.output.resolve()
@@ -75,6 +81,7 @@ def main():
         arguments={key: str(value) if isinstance(value, Path) else value for key, value in vars(args).items()},
         config=asdict(train.config), primary_deployment="sampled", secondary_deployment="greedy",
         work_contract="Matched decision ledger steps by per-date batch rounding; elapsed time and liquidation work reported",
+        joint_sizing=args.joint,
         seeds={})
     def write_report():
         (output / "comparison.json").write_text(json.dumps(report, indent=2)+"\n")
@@ -101,19 +108,61 @@ def main():
                                        scope="Once on all source training paths; shared by both arms"),
             results={})
         report["seeds"][str(seed)] = seed_report
-        for algorithm in ("source", "all_mode", "sampled"):
+        algorithms = ["source", "all_mode", "sampled"] + (["full_hpo"] if args.full_hpo else [])
+        control_method = "dh" if args.preset == "basic" else "ntb"
+        if args.continue_control:
+            algorithms.append(control_method)
+        for algorithm in algorithms:
             if algorithm == "source":
                 policy, training = teacher, None
+            elif algorithm in ("full_hpo", "dh", "ntb"):
+                # Keep the source's complete optimizer/PPO/critic recipe. Match
+                # new market/accounting work, not actor epochs or elapsed time.
+                target_work = seed_report["results"]["all_mode"]["training"]["decision_ledger_steps"]
+                source_checkpoint = (checkpoints[seed] if algorithm == "full_hpo" else
+                    policy_root / f"{algorithm}-seed{seed}" / f"step-{source_step}.pt")
+                original_method = "hpo" if algorithm == "full_hpo" else algorithm
+                original = load_checkpoint(source_checkpoint, method=original_method, config=train.config)
+                roots = original["options"]["batch_size"]
+                extra_updates = math.ceil(target_work / (roots * train.config.n_steps))
+                checkpoint = directory / algorithm / "latest.pt"
+                option_keys = ["batch_size", "hidden", "learning_rate", "zeta_learning_rate"]
+                if algorithm == "full_hpo":
+                    option_keys += ["ppo_epochs", "clip_ratio", "entropy_coefficient"]
+                source_options = {key: original["options"][key] for key in option_keys}
+                keywords = dict(seed=seed, updates=source_step+extra_updates, **source_options,
+                    device=args.device, checkpoint_path=checkpoint, checkpoint_every=25,
+                    resume_from=source_checkpoint)
+                _, training = (train_hybrid(train, **keywords) if algorithm == "full_hpo" else
+                               train_policy(algorithm, train, **keywords))
+                training["total_seconds"] -= original["elapsed_seconds"]
+                training["decision_ledger_steps"] = extra_updates * roots * train.config.n_steps
+                training["terminal_liquidations"] = extra_updates * roots
+                training["additional_rollout_updates"] = extra_updates
+                training["scope"] = "Continued original optimizer recipe; source network and threshold retained"
+                reloaded = load_checkpoint(checkpoint, method=original_method, config=train.config)
+                if algorithm == "full_hpo":
+                    policy = _load_policy(reloaded, train.config, args.device, train.spot.dtype)
+                else:
+                    policy = POLICIES[algorithm](train.config, hidden=original["options"]["hidden"]).to(
+                        device=args.device, dtype=train.spot.dtype)
+                    policy.load_state_dict(reloaded["policy"])
+                    policy.eval()
             else:
                 checkpoint = directory / algorithm / "latest.pt"
-                _, training = train_counterfactual(teacher, train, algorithm=algorithm, zeta=zeta,
+                trainer = train_joint_counterfactual if args.joint else train_counterfactual
+                _, training = trainer(teacher, train, algorithm=algorithm, zeta=zeta,
                     seed=seed, updates=args.updates, batch_size=args.batch_size,
-                    learning_rate=args.learning_rate, device=args.device, checkpoint_path=checkpoint)
-                policy = _load_policy(load_checkpoint(checkpoint, method=algorithm, config=train.config),
+                    learning_rate=args.learning_rate, device=args.device, checkpoint_path=checkpoint,
+                    **({"score_scope": args.score_scope} if args.joint else {}))
+                method = "joint_"+algorithm if args.joint else algorithm
+                policy = _load_policy(load_checkpoint(checkpoint, method=method, config=train.config),
                                       train.config, args.device, train.spot.dtype)
             result = dict(training=training, evaluation={})
-            for deployment, controller in (("sampled", sampled_controller(policy)),
-                                           ("greedy", policy_controller(policy))):
+            deployments = [("greedy", policy_controller(policy))]
+            if algorithm not in ("dh", "ntb"):
+                deployments.insert(0, ("sampled", sampled_controller(policy)))
+            for deployment, controller in deployments:
                 metrics, tape = evaluate_controller(controller, development, device=args.device,
                     batch_size=args.evaluation_batch_size, mode_seed=seed+410003,
                     label=f"{algorithm}-{seed}/{deployment}/development", zeta=zeta, progress=True)
@@ -122,7 +171,7 @@ def main():
             seed_report["results"][algorithm] = result
             write_report()
             _report("counterfactual_result", algorithm=algorithm, seed=seed,
-                    sampled_es95=result["evaluation"]["sampled"]["es95"],
+                    sampled_es95=result["evaluation"].get("sampled", {}).get("es95"),
                     greedy_es95=result["evaluation"]["greedy"]["es95"])
 
 
