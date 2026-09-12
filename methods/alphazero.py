@@ -43,6 +43,8 @@ def holding_grid(config, points=3):
     """Configured absolute holdings; zero and legal lot multiples are included."""
     if points < 2:
         raise ValueError("the holding lattice requires at least two axis points")
+    if config.execution.holding_lower is None or config.execution.holding_upper is None:
+        raise ValueError("discrete search requires an explicitly bounded action grid")
     axes = []
     for lower, upper, lot in zip(config.execution.vector("holding_lower", config.n_assets),
                                  config.execution.vector("holding_upper", config.n_assets),
@@ -69,6 +71,11 @@ class AlphaZeroPolicy(_ConfiguredPolicy):
 
     def __init__(self, config, hidden=(64, 64), *, targets=None, grid_points=3):
         super().__init__(config)
+        if config.risk.objective != "es":
+            raise ValueError("this RU-value AlphaZero adapter is ES-only; use source_alphazero for MSE")
+        if config.time_grid.trade_at_maturity or any(instrument.needs_integrated_variance
+                for instrument in (config.portfolio.liability, *config.portfolio.hedges)):
+            raise ValueError("this planner is not qualified for terminal trades or path-dependent instruments")
         targets = (holding_grid(config, grid_points) if targets is None
                    else torch.as_tensor(targets, dtype=torch.float64))
         lo = targets.new_tensor(config.execution.vector("holding_lower", config.n_assets))
@@ -454,7 +461,9 @@ def alphazero_controller(policy, *, simulations=32, seed=30001, c_puct=1., progr
         policy.eval()
         candidates, legal = policy.candidates(ledger.positions, config)
         if simulations == 0:
-            logits, _ = policy(policy.features(observed, spot0=config.market.spot0))
+            # Policy-only deployment needs no critic or wealth-feature work.
+            # Actor inputs are the observed state, without the value threshold.
+            logits = policy.network(observed)
             actions = logits.masked_fill(~legal, -torch.inf).argmax(-1)
             work["network_rows"] += len(observed)
         else:

@@ -19,8 +19,9 @@ method adapters.
   itself. Check prices, cash accounting, discretization and policy risk separately.
   Report unresolved numerical precision honestly. API checks do not certify
   market realism or establish method superiority.
-- Formal comparisons use fresh paths, multiple training seeds, pooled terminal
-  cost-inclusive ES and complete compute costs. Declare configurations and
+- Formal comparisons use fresh paths, multiple training seeds, the declared
+  pooled terminal cost-inclusive objective (such as MSE or ES) and complete
+  compute costs. Declare configurations and
   metrics first; do not tune on final results or weaken baselines.
 - Distinguish implementation checks, adaptations, reproductions and scientific
   conclusions. A narrow failure only rejects what it tested; diagnose and record

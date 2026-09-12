@@ -1,0 +1,27 @@
+{
+  "market": {
+    "model": "gbm",
+    "spot0": 1.0,
+    "v0": 0.09,
+    "mu": 0.0,
+    "r": 0.0,
+    "q": 0.0
+  },
+  "time_grid": {"n_steps": 30, "days_per_year": 365},
+  "portfolio": {
+    "liability": {"strike": 1.0, "maturity": 0.0821917808219178, "kind": "call"},
+    "hedges": [],
+    "liability_quantity": 1.0
+  },
+  "execution": {
+    "proportional": 0.0,
+    "quadratic": 0.0,
+    "fixed_ticket": 0.0,
+    "minimum_commission": 0.0,
+    "minimum_trade": 0.0,
+    "trade_lot": 0.0,
+    "holding_lower": -1.0,
+    "holding_upper": 1.0
+  },
+  "risk": {"alpha": 0.95, "objective": "mse"}
+}

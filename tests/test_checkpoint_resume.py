@@ -1,4 +1,6 @@
 """An interrupted learner must continue the same training trajectory."""
+from dataclasses import asdict, replace
+
 import pytest
 import torch
 
@@ -7,6 +9,29 @@ from hedging_gym.config import TimeGrid
 from hedging_gym.finance import generate_market_bank
 from methods.training import train_policy
 from methods.hybrid import train_hybrid
+
+
+def test_legacy_qe_checkpoint_and_bank_cannot_resume_as_qe_m(tmp_path):
+    from experiments.baselines import _load_bank
+    from methods.checkpoints import load_checkpoint
+
+    modern = benchmark_config()
+    legacy = replace(modern, market=replace(modern.market, scheme="qe"))
+    saved_config = asdict(legacy)
+    saved_config["market"].pop("scheme")
+    checkpoint = tmp_path / "checkpoint.pt"
+    torch.save(dict(method="dh", config=saved_config), checkpoint)
+    assert load_checkpoint(checkpoint, method="dh", config=legacy)["method"] == "dh"
+    with pytest.raises(ValueError, match="configuration differs"):
+        load_checkpoint(checkpoint, method="dh", config=modern)
+
+    bank = tmp_path / "bank.pt"
+    torch.save(dict(config=saved_config, seed=19,
+        spot=torch.ones(2, 31), variance=torch.full((2, 31), .04),
+        marks=torch.ones(2, 31, legacy.n_assets), liability=torch.zeros(2, 31)), bank)
+    assert _load_bank(bank, legacy, 19, "cpu").config.market.scheme == "qe"
+    with pytest.raises(ValueError, match="configuration/seed differs"):
+        _load_bank(bank, modern, 19, "cpu")
 
 
 @pytest.mark.parametrize("method", ["dh", "ntb", "hpo"])
@@ -20,6 +45,12 @@ def test_split_training_matches_uninterrupted(method, tmp_path):
     full, full_meta = train(updates=4, **options)
     path = tmp_path / "latest.pt"
     train(updates=2, checkpoint_path=path, checkpoint_every=1, **options)
+    # Older snapshots omit newly added fields whose defaults preserve the task.
+    legacy = torch.load(path, weights_only=False)
+    for key in ("step_days", "trade_at_maturity"):
+        legacy["config"]["time_grid"].pop(key)
+    legacy["config"].pop("settlement")
+    torch.save(legacy, path)
     resumed, meta = train(updates=4, resume_from=path, checkpoint_path=path, **options)
     for name, value in full.state_dict().items():
         if isinstance(value, torch.Tensor):

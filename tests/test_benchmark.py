@@ -45,6 +45,7 @@ def test_market_adaptation_and_execution_overlay_compose_without_cross_talk():
         for base in (basic, with_fee, with_lots):
             (_, a), (_, b), (_, returned) = benchmark.adaptation_configs(base)
             assert a == base == returned
+            assert b.market.v0 == pytest.approx(2.25 * a.market.v0)
             assert finance.observation_fields(a) == finance.observation_fields(b)
             assert {key for key, value in asdict(b.market).items()
                     if value != asdict(a.market)[key]} == changed_fields

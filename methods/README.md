@@ -5,6 +5,9 @@ the same market, observations, legal trades and cash ledger. The installable
 `hedging_gym` package contains the environment and evaluator; learners remain
 outside it.
 
+See the [implementation appendix](../docs/baseline-methods.md) for the distinction
+between author-code references, common-task transfers and diagnostic ports.
+
 | Adapter | Behavior |
 |---|---|
 | `classical.py` | Current model-price sensitivities and bounded stock/option hedge targets |
@@ -61,6 +64,33 @@ and too few tail observations to support a hedging-quality claim. Interpret
 timings separately for bank preparation, training and evaluation; equal seeds
 across devices do not guarantee equal paths.
 
+### Acceleration
+
+The common methods batch independent market paths, policy evaluations and
+replay minibatches. DH, learned bands, hybrid policies and task embeddings can
+keep their bank, ledger and gradients on GPU. Classical Greeks batch pricing
+and differentiation; CEM batches roots, candidates and conditional scenarios.
+For the separate adapter that imports the published MCTS/Trainer directly, see
+[AlphaZero source-loop qualification](../docs/source-alphazero.md). It preserves
+the donor's training loop and records its differences from the common ES task;
+it is not yet a competitive baseline.
+
+AlphaZero batches leaf pricing/inference across independent roots while each
+tree keeps sequential selection and backup. Policy-only AlphaZero skips its
+unused critic.
+
+For SB3, `experiments.qualify_sb3 --device cpu|cuda` selects the PPO learner and
+evaluator device. Its original NumPy VecEnv remains CPU-batched; the shared
+evaluator uses the same SB3 action distribution directly on tensors, including
+action clipping. Small MLPs can be faster on CPU, so time a representative
+complete workload before choosing a device. Parallelize independent seeds
+rather than oversubscribing every small matrix operation.
+
+Acceleration must retain objectives, updates per transition and search budgets.
+Check fixed-input actions, losses and gradients against the reference before a
+long run. Record any changed collection ordering; faster execution does not by
+itself establish a stronger or faithfully reproduced algorithm.
+
 ## Execution and evaluation limits
 
 Derive policy input and output sizes from the configured observation schema and
@@ -91,9 +121,19 @@ as optimized hedging. Targets enter the common ledger without implicit rounding.
 
 ## Full comparison set
 
-All methods use the same observed state, instrument set, accounting and terminal
-expected shortfall. The common benchmark is an **adaptation of the paper
-methods**, not a claim to reproduce their original experiments.
+All methods use the same observed state, instrument set and accounting, and
+report the same terminal expected shortfall. Source-preserving learners can
+retain different training objectives; those are disclosed, not called identical
+ES optimizers. The common benchmark is an **adaptation of the paper methods**,
+not a claim to reproduce their original experiments.
+
+The approved additions are **CrossQ**, **TQC** and **SimBaV2**, all with continuous
+hedge actions. CrossQ and TQC use SB3-Contrib; SimBaV2 uses the authors' JAX
+implementation. They are being qualified, not yet reported as trained or
+competitive baselines. Their papers and source links are in
+[related work](../docs/related-work.md), and their objective mappings are in the
+[implementation appendix](../docs/baseline-methods.md). Rainbow is not part of
+this addition because it would require a discretized hedge-action set.
 
 | Command name | Learning/control mechanism | Source and main transfer change |
 |---|---|---|

@@ -87,7 +87,8 @@ def delta_hedge_positions(bank: MarketBank, *, band: float = 0.0, deltas=None, c
     return torch.stack(positions, dim=1)
 
 
-def spot_variance_greeks(spot, variance, time_index, config, *, hedge_index=0, chunk_size=1024):
+def spot_variance_greeks(spot, variance, time_index, config, *, hedge_index=0, chunk_size=1024,
+                         integrated_variance=None):
     """Return (dS,dv), each shaped [..., liability/selected hedge], in float64.
 
     The signed liability and selected unit hedge option get their model-price
@@ -96,7 +97,7 @@ def spot_variance_greeks(spot, variance, time_index, config, *, hedge_index=0, c
     roundoff near zero. Select the hedge contract before evaluating controls.
     """
     return _pair_greeks(spot, variance, time_index, config,
-                        hedge_index=hedge_index, chunk_size=chunk_size)
+                        hedge_index=hedge_index, chunk_size=chunk_size, integrated_variance=integrated_variance)
 
 
 def spot_gamma_greeks(spot, variance, time_index, config, *, hedge_index=0, chunk_size=1024):
@@ -105,7 +106,8 @@ def spot_gamma_greeks(spot, variance, time_index, config, *, hedge_index=0, chun
                         hedge_index=hedge_index, chunk_size=chunk_size, gamma=True)
 
 
-def _pair_greeks(spot, variance, time_index, config, *, hedge_index, chunk_size, gamma=False):
+def _pair_greeks(spot, variance, time_index, config, *, hedge_index, chunk_size, gamma=False,
+                integrated_variance=None):
     if not 0 <= hedge_index < len(config.portfolio.hedges) or chunk_size < 1:
         raise ValueError("select an available hedge option and a positive chunk size")
     liability = config.portfolio.liability
@@ -116,6 +118,8 @@ def _pair_greeks(spot, variance, time_index, config, *, hedge_index, chunk_size,
         torch.as_tensor(time_index, dtype=torch.float64, device=spot.device),
     )
     shape = s.shape
+    integral = (None if integrated_variance is None else
+                torch.broadcast_to(integrated_variance.to(s), shape).reshape(-1))
     s, v, time = s.reshape(-1), v.reshape(-1), t.reshape(-1) * config.dt
     maturities = torch.stack((liability.maturity - time, hedge.maturity - time), dim=-1)
     if bool((maturities <= 0).any()):
@@ -126,14 +130,14 @@ def _pair_greeks(spot, variance, time_index, config, *, hedge_index, chunk_size,
         with torch.enable_grad():
             ss = s[sl, None].expand(-1, 2).clone().requires_grad_(True)
             vv = v[sl, None].expand(-1, 2).clone().requires_grad_(True)
-            # Pricing each contract through the shared option dispatcher keeps
-            # mixed call/put books and their gradients on the core equations.
+            # The same instrument interface handles options and the variance
+            # claim. Past realized variance is held fixed in current-state Greeks.
+            realized = None if integral is None else integral[sl]
             prices = torch.stack((
-                config.portfolio.liability_quantity * option_price(
-                    ss[:, 0], vv[:, 0], maturities[sl, 0], liability.strike,
-                    config.market, kind=liability.kind),
-                option_price(ss[:, 1], vv[:, 1], maturities[sl, 1], hedge.strike,
-                             config.market, kind=hedge.kind),
+                config.portfolio.liability_quantity * liability.mark(
+                    ss[:, 0], vv[:, 0], maturities[sl, 0], config.market, integrated_variance=realized),
+                hedge.mark(ss[:, 1], vv[:, 1], maturities[sl, 1], config.market,
+                            integrated_variance=realized),
             ), dim=-1)
             if gamma:
                 ds, = torch.autograd.grad(prices.sum(), ss, create_graph=True)
@@ -168,7 +172,9 @@ def delta_variance_hedge_positions(bank: MarketBank, hedge_index=0, greeks=None,
     if greeks is None:
         times = torch.arange(c.n_steps, device=bank.spot.device)[None, :]
         greeks = spot_variance_greeks(bank.spot[:, :-1], bank.variance[:, :-1], times, c,
-                                      hedge_index=hedge_index, chunk_size=chunk_size)
+                                      hedge_index=hedge_index, chunk_size=chunk_size,
+                                      integrated_variance=None if bank.integrated_variance is None
+                                      else bank.integrated_variance[:, :-1])
     ds, dv = greeks
     if ds.shape != bank.spot[:, :-1].shape + (2,) or dv.shape != ds.shape:
         raise ValueError("cached Greeks must have shape [paths,n_steps,2]")

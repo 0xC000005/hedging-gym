@@ -78,15 +78,15 @@ def benchmark_config(*, model="heston", time_grid=None, portfolio=None,
 def adaptation_configs(base_config=None, *, market_changes=None):
     """Market-only A -> B -> A; execution, contracts and calendar stay fixed.
 
-    Default B raises initial variance to .09 and, for Heston/Bates, long-run
-    variance to .09. Explicit changes may alter only stochastic-core parameters
-    within the selected model family. Apply operational_config to the baseline
-    first to test this same sequence with a constant operational overlay.
+    Default B scales initial volatility by 1.5 and, for Heston/Bates, long-run
+    volatility likewise (variances by 2.25). Explicit changes may alter only
+    stochastic-core parameters within the selected model family. Apply
+    operational_config first to test this sequence with a constant execution overlay.
     """
     baseline = benchmark_config() if base_config is None else base_config
-    changes = dict(v0=.09)
+    changes = dict(v0=2.25 * baseline.market.v0)
     if baseline.market.model in ("heston", "bates"):
-        changes["theta"] = .09
+        changes["theta"] = 2.25 * baseline.market.theta
     if market_changes is not None:
         changes = dict(market_changes)
     if set(changes) - {"v0", *finance.market_parameter_names(baseline.market)}:

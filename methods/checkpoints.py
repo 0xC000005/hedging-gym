@@ -3,10 +3,10 @@
 Training state belongs to each method; this module only handles files and RNG.
 Checkpoint files can contain Python objects. Load only artifacts you trust.
 """
-from dataclasses import asdict
 from pathlib import Path
 
 import torch
+from hedging_gym.config import config_from_dict
 
 
 def rng_state():
@@ -35,7 +35,8 @@ def save_checkpoint(path, payload):
 
 def load_checkpoint(path, *, method, config):
     saved = torch.load(path, map_location="cpu", weights_only=False)
-    if saved["method"] != method or saved["config"] != asdict(config):
+    # New optional config fields must not invalidate an unchanged older task.
+    if saved["method"] != method or config_from_dict(saved["config"]) != config:
         raise ValueError("checkpoint method or financial configuration differs")
     return saved
 

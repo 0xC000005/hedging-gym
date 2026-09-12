@@ -25,7 +25,7 @@ def empirical_es(values: torch.Tensor, alpha: float) -> float:
 @torch.no_grad()
 def evaluate_controller(controller, bank, *, device=None, batch_size=1024, mode_seed=30001,
                         label="Controller evaluation", zeta=None, progress=False):
-    """Run complete shared tensor episodes; ES is computed after pooling paths.
+    """Run complete shared tensor episodes; MSE and ES use all pooled path losses.
 
     Trade tapes retain the executed quantities. Batch size and order are part of the sampled-policy RNG contract, as in native evaluation.
     Timing includes transfers, controller calls, ledger execution and tapes;
@@ -41,7 +41,7 @@ def evaluate_controller(controller, bank, *, device=None, batch_size=1024, mode_
         torch.cuda.synchronize(device)
     started, batches = time.perf_counter(), []
     if progress:
-        print(f"{label}: {len(bank.spot)} paths, {bank.config.n_steps} dates, batch {batch_size}, "
+        print(f"{label}: {len(bank.spot)} paths, {bank.config.n_decisions} decisions, batch {batch_size}, "
               f"mode seed {mode_seed}, device {device}", flush=True)
     keys = ("terminal_loss", "transaction_cost", "turnover", "tickets", "constraint_violations", "positions")
     with torch.random.fork_rng(devices=devices):
@@ -55,7 +55,7 @@ def evaluate_controller(controller, bank, *, device=None, batch_size=1024, mode_
             observed = env.reset()
             positions = []
             violations = torch.zeros(len(sample.spot), dtype=torch.long, device=device)
-            for time_index in range(bank.config.n_steps):
+            for time_index in range(bank.config.n_decisions):
                 target = controller(observed, env.state, time_index, bank.config)
                 if not isinstance(target, torch.Tensor) or target.shape != env.state.positions.shape:
                     raise ValueError("controller must return a tensor shaped [batch,n_assets]")
@@ -69,7 +69,7 @@ def evaluate_controller(controller, bank, *, device=None, batch_size=1024, mode_
                 # the independent NumPy tape audit checks this again offline.
                 observed, _, terminated, truncated, result = env.step(target)
             if not terminated or truncated:
-                raise RuntimeError("complete financial episodes are required for terminal ES")
+                raise RuntimeError("complete financial episodes are required for terminal loss metrics")
             result.update(positions=torch.stack(positions, 1), constraint_violations=violations)
             batches.append({key: result[key].cpu() for key in keys})
             if progress:
@@ -85,6 +85,8 @@ def evaluate_controller(controller, bank, *, device=None, batch_size=1024, mode_
         torch.cuda.synchronize(device)
     alpha = bank.config.risk.alpha
     metrics = dict(label=label, paths=len(loss), mean_loss=float(loss.double().mean()),
+        mse=float(loss.double().square().mean()),
+        rmse=float(loss.double().square().mean().sqrt()),
         risk_alpha=alpha, expected_shortfall=empirical_es(loss, alpha),
         es95=empirical_es(loss, .95), es99=empirical_es(loss, .99),
         transaction_cost_mean=float(raw["transaction_cost"].double().mean()),
@@ -96,7 +98,10 @@ def evaluate_controller(controller, bank, *, device=None, batch_size=1024, mode_
         effective_tail_paths95=.05*len(loss), effective_tail_paths99=.01*len(loss),
         evaluation_seconds=time.perf_counter()-started, device=str(device),
         timing_scope="Whole frozen evaluation: transfers, decisions, tensor ledger and CPU tapes; excludes bank generation/training")
-    if zeta is not None:
+    metrics["objective"] = bank.config.risk.objective
+    metrics["objective_value"] = (metrics["mse"] if bank.config.risk.objective == "mse"
+                                  else metrics["expected_shortfall"])
+    if zeta is not None and bank.config.risk.objective == "es":
         threshold = float(zeta.detach().cpu()) if isinstance(zeta, torch.Tensor) else float(zeta)
         metrics.update(zeta=threshold,
             ru_at_training_zeta=float(bank.config.risk.loss(loss.double(), threshold).mean()))

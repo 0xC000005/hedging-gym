@@ -32,6 +32,8 @@ class HybridPolicy(_ConfiguredPolicy):
     """
     def __init__(self, config, hidden=(64, 64)):
         super().__init__(config)
+        if config.execution.holding_lower is None or config.execution.holding_upper is None:
+            raise ValueError("this HPO sizing parameterization requires finite holding bounds")
         self.n_modes = 2 ** self.n_assets
         self.discrete = _network(self.feature_dim, self.n_modes, hidden)
         self.continuous = _network(self.feature_dim, self.n_modes * self.n_assets, hidden)
@@ -72,7 +74,7 @@ def hybrid_rollout(policy, bank, *, generator=None, deterministic=False):
     env = TensorHedgingEnv(bank)
     observed = env.reset()
     histories, indices, scores, entropies = [], [], [], []
-    for _ in range(bank.config.n_steps):
+    for _ in range(bank.config.n_decisions):
         histories.append(observed)
         distribution = Categorical(logits=policy.discrete(observed))
         mode = (distribution.probs.argmax(-1) if deterministic else
@@ -147,7 +149,7 @@ def train_hybrid(train_bank, *, seed=7, updates=8, batch_size=32, hidden=(32, 32
         loss = result["terminal_loss"]
         risk_cost = config.risk.loss(loss, zeta.detach())
         fixed_observed, old_log_probs = observed.detach(), log_probs.detach()
-        returns = risk_cost.detach().expand(config.n_steps, -1)
+        returns = risk_cost.detach().expand(config.n_decisions, -1)
         value = policy.value_cost(fixed_observed, zeta)
         advantage = (returns - value).detach()
         # Sum score contributions over time; pathwise terminal loss occurs once.
@@ -178,10 +180,11 @@ def train_hybrid(train_bank, *, seed=7, updates=8, batch_size=32, hidden=(32, 32
                 approximate_kl = ((ratio - 1) - (new_scores - old_log_probs)).mean()
             if approximate_kl > .015:
                 break
-        threshold_loss = config.risk.loss(loss.detach(), zeta).mean()
-        threshold_optimizer.zero_grad(set_to_none=True)
-        threshold_loss.backward()
-        threshold_optimizer.step()
+        if config.risk.objective == "es":
+            threshold_loss = config.risk.loss(loss.detach(), zeta).mean()
+            threshold_optimizer.zero_grad(set_to_none=True)
+            threshold_loss.backward()
+            threshold_optimizer.step()
         with torch.no_grad():
             policy.zeta.copy_(zeta)
         if update == 1 or update % 20 == 0 or update == updates:

@@ -16,7 +16,7 @@ from gymnasium.vector.utils import batch_space
 
 from .finance import (
     MarketBank, generate_market_bank, initial_state, liquidate,
-    observation, observation_fields, trade_step, feasible_targets,
+    observation, observation_fields, trade_step, feasible_targets, settle_ledger,
 )
 
 
@@ -28,14 +28,15 @@ class TensorHedgingEnv:
     Actions/candidates use the ledger dtype; this differentiable boundary cast
     is shared by masks and execution, never lot rounding or action projection.
     Tensor actions preserve gradients through all cash/holding transitions.
-    Reward is zero until settlement, then cost-inclusive terminal P&L. To train
-    expected shortfall, apply the global Rockafellar--Uryasev loss to the episode batch,
-    not a new conditional CVaR objective at every date.
+    Reward is zero until settlement, then negative squared loss for MSE.
+    ES returns P&L unless a global risk_threshold is supplied; a differentiable
+    learner can instead apply config.risk.loss to its complete episode batch.
     """
 
-    def __init__(self, bank: MarketBank):
+    def __init__(self, bank: MarketBank, *, risk_threshold=None):
         self._bank = bank
         self.config = bank.config
+        self.risk_threshold = risk_threshold
         self.reset()
 
     def reset(self):
@@ -59,7 +60,7 @@ class TensorHedgingEnv:
         return feasible_targets(self.state.positions[:, None], candidates, self.config).all(-1)
 
     def step(self, target_holdings):
-        if self.time_index >= self.config.n_steps:
+        if self.time_index >= self.config.n_decisions:
             raise RuntimeError("episode has ended; reset before stepping")
         if (not isinstance(target_holdings, torch.Tensor)
                 or target_holdings.shape != self.state.positions.shape
@@ -72,18 +73,17 @@ class TensorHedgingEnv:
         self.state = trade_step(self.state, target_holdings.clone(),
                                 self._bank.marks[:, self.time_index], self.config)
         self.time_index += 1
-        terminated = self.time_index == self.config.n_steps
+        terminated = self.time_index == self.config.n_decisions
         info = {}
         reward = torch.zeros_like(self.state.cash)
         if terminated:
             info = liquidate(self.state, self._bank.marks[:, -1],
                              self._bank.liability[:, -1], self.config)
-            reward = info["terminal_pnl"]
-            self.state = trade_step(self.state, torch.zeros_like(self.state.positions),
-                                    self._bank.marks[:, -1], self.config, liquidating=True)
+            reward = self.config.risk.reward(info["terminal_loss"], self.risk_threshold)
+            self.state = settle_ledger(self.state, self._bank.marks[:, -1], self.config)
             # Terminal observation is after liquidation but before paying the
             # liability, matching liquidate's explicit cash/payoff convention.
-        return observation(self._bank, self.time_index, self.state), reward, terminated, False, info
+        return observation(self._bank, min(self.time_index, self.config.n_steps), self.state), reward, terminated, False, info
 
 
 class HedgingVectorEnv(VectorEnv):
@@ -103,9 +103,9 @@ class HedgingVectorEnv(VectorEnv):
 
     Reset includes selected-model path generation and option pricing. Step only
     exposes the current date and executes the shared ledger. Default terminal
-    reward is P&L; optional risk_threshold gives negative global RU loss at the
-    configured risk confidence, not per-step CVaR. The threshold is fitted by
-    the learner, never the env.
+    reward follows config.risk: negative squared loss for MSE, or P&L for ES
+    until risk_threshold supplies the global RU threshold. The threshold is
+    fitted by the learner, never the env.
     simulation_substeps refines internal integration, not the trading calendar.
     """
 
@@ -146,7 +146,7 @@ class HedgingVectorEnv(VectorEnv):
         bank = generate_market_bank(self.config, self.num_envs, market_seed,
                                     device=self.device, price_chunk_size=self.price_chunk_size,
                                     substeps=self.simulation_substeps)
-        self._tensor_env = TensorHedgingEnv(bank)
+        self._tensor_env = TensorHedgingEnv(bank, risk_threshold=self.risk_threshold)
         return self._tensor_env.reset(), {}
 
     def step_tensor(self, actions):
@@ -156,8 +156,6 @@ class HedgingVectorEnv(VectorEnv):
         if actions.shape != self.action_space.shape:
             raise ValueError("actions must be [num_envs,n_assets] target holdings")
         obs, reward, terminated, truncated, info = self._tensor_env.step(actions)
-        if terminated and self.risk_threshold is not None:
-            reward = -self.config.risk.loss(info["terminal_loss"], self.risk_threshold)
         return (obs, reward,
                 torch.full((self.num_envs,), terminated, dtype=torch.bool, device=self.device),
                 torch.full((self.num_envs,), truncated, dtype=torch.bool, device=self.device), info)
@@ -194,8 +192,8 @@ class HedgingEnv(gym.Env):
 
     Defaults to the basic common benchmark. The NumPy API is convenient for
     generic RL packages, not the accelerated path for direct-gradient methods.
-    A fixed risk_threshold optionally returns terminal negative RU loss at the
-    configured risk confidence. Fitting the global threshold remains the learner's job.
+    Terminal reward follows config.risk. MSE needs no threshold; for ES, a fixed
+    risk_threshold optionally returns negative RU loss instead of raw P&L.
     simulation_substeps refines integration while preserving all trading dates.
     """
 
@@ -219,7 +217,7 @@ class HedgingEnv(gym.Env):
         super().reset(seed=seed)
         market_seed = int(self.np_random.integers(0, 2**63 - 1))
         bank = generate_market_bank(self.config, 1, market_seed, substeps=self.simulation_substeps)
-        self._tensor_env = TensorHedgingEnv(bank)
+        self._tensor_env = TensorHedgingEnv(bank, risk_threshold=self.risk_threshold)
         return self._tensor_env.reset()[0].numpy(), {}
 
     def step(self, action):
@@ -229,8 +227,6 @@ class HedgingEnv(gym.Env):
         if self._tensor_env is None:
             raise RuntimeError("reset before stepping")
         obs, reward, terminated, truncated, info = self._tensor_env.step(torch.from_numpy(action)[None])
-        if terminated and self.risk_threshold is not None:
-            reward = -self.config.risk.loss(info["terminal_loss"], self.risk_threshold)
         info = {key: value[0].detach().numpy() for key, value in info.items()}
         reward = float(reward[0].detach())
         return obs[0].detach().numpy(), reward, terminated, truncated, info

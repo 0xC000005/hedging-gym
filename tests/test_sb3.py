@@ -9,7 +9,7 @@ from hedging_gym import benchmark_config
 from hedging_gym.config import TimeGrid
 from hedging_gym.finance import generate_market_bank
 from hedging_gym.gym_env import TensorHedgingEnv
-from methods.sb3 import SB3HedgingVecEnv
+from methods.sb3 import SB3HedgingVecEnv, sb3_controller
 
 
 def test_sb3_ledger_reward_and_autoreset():
@@ -49,4 +49,31 @@ def test_stock_ppo_checkpoint_actions(tmp_path):
     model.save(tmp_path / "ppo")
     loaded = PPO.load(tmp_path / "ppo", device="cpu")
     np.testing.assert_array_equal(loaded.predict(obs, deterministic=True)[0], actions)
+    env.close()
+
+
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+def test_tensor_ppo_actions_match_original_predict(device):
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA unavailable")
+    config = benchmark_config(model="gbm", time_grid=TimeGrid(n_steps=3))
+    bank = generate_market_bank(config, 12, 440)
+    env = SB3HedgingVecEnv(bank, 4)
+    model = PPO("MlpPolicy", env, seed=7, n_steps=3, batch_size=12, device=device,
+                policy_kwargs=dict(net_arch=[8]))
+    batch = torch.from_numpy(env.reset()).to(device)
+    # Exercise clipping as well as ordinary deterministic and sampled actions.
+    for bias in (0., 4.):
+        with torch.no_grad():
+            model.policy.action_net.bias.fill_(bias)
+        for dtype in (torch.float32, torch.float64):
+            observed = batch.to(dtype)
+            lower, upper = observed.new_tensor(env.lower), observed.new_tensor(env.upper)
+            for deterministic in (True, False):
+                torch.manual_seed(81)
+                original = model.predict(observed.cpu().numpy(), deterministic=deterministic)[0]
+                expected = lower+(torch.as_tensor(original, device=device)+1.)*(upper-lower)/2.
+                torch.manual_seed(81)
+                actual = sb3_controller(model, deterministic=deterministic)(observed, None, 0, config)
+                torch.testing.assert_close(actual, expected, rtol=0, atol=0)
     env.close()

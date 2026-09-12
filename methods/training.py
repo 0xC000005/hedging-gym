@@ -46,7 +46,7 @@ def rollout(policy, bank, *, record_positions=False):
     env = TensorHedgingEnv(bank)
     observed = env.reset()
     positions = []
-    for _ in range(bank.config.n_steps):
+    for _ in range(bank.config.n_decisions):
         target = policy(observed, env.state.positions, bank.config.execution.holding_lower,
                         bank.config.execution.holding_upper, deterministic=True).target_holdings
         if record_positions:

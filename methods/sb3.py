@@ -87,11 +87,21 @@ class SB3HedgingVecEnv(VecEnv):
 
 
 def sb3_controller(model, *, deterministic=True):
-    """Invert the trainer's action coordinates before authoritative evaluation."""
+    """Tensor-native PPO inference, with the same actions as SB3 ``predict``.
+
+    This wrapper's Box is [-1, 1]. SB3's policy distribution is unchanged; its
+    sampled actions are clipped before mapping to holdings, just as ``predict``
+    does. Avoid the tensor -> CPU NumPy -> GPU -> CPU -> tensor round trip in
+    the shared evaluator. SB3 training still uses its original NumPy VecEnv.
+    """
+    @torch.no_grad()
     def controller(observed, ledger, time_index, config):
-        action, _ = model.predict(observed.detach().cpu().numpy(), deterministic=deterministic)
+        model.policy.set_training_mode(False)
+        features = observed.to(device=model.device, dtype=torch.float32)
+        action = model.policy.get_distribution(features).get_actions(deterministic=deterministic)
+        action = action.clamp(-1., 1.).to(device=observed.device)
         lower = observed.new_tensor(config.execution.vector("holding_lower", config.n_assets))
         upper = observed.new_tensor(config.execution.vector("holding_upper", config.n_assets))
-        return lower + (torch.as_tensor(action, device=observed.device) + 1.) * (upper-lower) / 2.
+        return lower + (action + 1.) * (upper-lower) / 2.
     controller.action_selection = "SB3 PPO deterministic" if deterministic else "SB3 PPO sampled"
     return controller

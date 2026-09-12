@@ -51,6 +51,8 @@ def main():
     parser.add_argument("--rollouts-per-phase", type=int, default=8)
     parser.add_argument("--epochs", type=int, default=10)
     parser.add_argument("--threads", type=int, default=2)
+    parser.add_argument("--device", choices=("cpu", "cuda"), default="cpu",
+                        help="PPO learner/evaluator device; the original SB3 VecEnv remains CPU-batched")
     args = parser.parse_args()
     torch.set_num_threads(args.threads)
     training = load_bank(args.run_dir / "train_bank.pt")
@@ -64,11 +66,12 @@ def main():
         episodes=total//training.config.n_steps, episodes_per_rollout=args.envs,
         nominal_tail_episodes_per_rollout=args.envs*(1-training.config.risk.alpha),
         gamma=1., gae_lambda=1., learning_rate=3e-4, hidden=[64,64],
-        log_std_init=-1., device="cpu", training="uniform batches without replacement within a batch from saved training bank")
+        log_std_init=-1., device=args.device, environment_device="cpu",
+        training="uniform batches without replacement within a batch from saved training bank")
     (args.output_dir / "recipe.json").write_text(json.dumps(recipe, indent=2)+"\n")
     print(json.dumps(recipe), flush=True)
     env = SB3HedgingVecEnv(training, args.envs)
-    model = PPO("MlpPolicy", env, seed=args.seed, device="cpu", verbose=0,
+    model = PPO("MlpPolicy", env, seed=args.seed, device=args.device, verbose=0,
         n_steps=training.config.n_steps, batch_size=min(1024, steps_per_rollout),
         n_epochs=args.epochs, gamma=1., gae_lambda=1., learning_rate=3e-4,
         policy_kwargs=dict(net_arch=dict(pi=[64,64], vf=[64,64]), log_std_init=-1.))
@@ -76,13 +79,13 @@ def main():
     records = []
     for phase in range(args.phases+1):
         _, sample = evaluate_controller(sb3_controller(model, deterministic=False), calibration,
-                                       batch_size=512, mode_seed=91001+phase)
+                                       device=args.device, batch_size=512, mode_seed=91001+phase)
         zeta = float(torch.quantile(sample["terminal_loss"], training.config.risk.alpha))
         record = dict(phase=phase, transitions=model.num_timesteps, zeta=zeta, scores={})
         for deterministic in (True, False):
             name = "greedy" if deterministic else "sampled"
             metrics, tape = evaluate_controller(sb3_controller(model, deterministic=deterministic),
-                development, batch_size=512, mode_seed=30001, zeta=zeta)
+                development, device=args.device, batch_size=512, mode_seed=30001, zeta=zeta)
             reference = numpy_ledger(development.marks.numpy(), tape["positions"].numpy(),
                 development.liability[:,0].numpy(), development.liability[:,-1].numpy(), development.config)
             error = float(np.max(np.abs(reference["terminal_loss"]-tape["terminal_loss"].numpy())))
@@ -100,9 +103,9 @@ def main():
         env.risk_threshold = zeta
         model.learn(args.rollouts_per_phase*steps_per_rollout,
                     reset_num_timesteps=False, callback=progress)
-    reloaded = PPO.load(args.output_dir / f"phase{args.phases}", device="cpu")
+    reloaded = PPO.load(args.output_dir / f"phase{args.phases}", device=args.device)
     _, loaded_tape = evaluate_controller(sb3_controller(reloaded), development,
-                                        batch_size=512, mode_seed=30001)
+                                        device=args.device, batch_size=512, mode_seed=30001)
     original = torch.load(args.output_dir / f"phase{args.phases}-greedy.pt", weights_only=False)
     torch.testing.assert_close(loaded_tape["terminal_loss"], original["terminal_loss"], rtol=0, atol=0)
     print("Final checkpoint reload: identical greedy terminal losses", flush=True)

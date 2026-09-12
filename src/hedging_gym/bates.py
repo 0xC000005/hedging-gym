@@ -1,7 +1,7 @@
-"""Bates backend: Heston QE diffusion plus independent lognormal Poisson jumps.
+"""Bates backend: Heston QE/QE-M plus independent lognormal Poisson jumps.
 
 Jump aggregation is exact within each step. The continuous component remains
-the disclosed, approximate Heston QE/log-spot scheme. P/Q share jump parameters
+the configured, approximate Heston scheme. P/Q share jump parameters
 and zero drift here; the compensator preserves the jump factor's mean of one.
 """
 from __future__ import annotations
@@ -24,7 +24,7 @@ def jump_characteristic(u, maturity, config):
 
 
 def bates_transition(spot, variance, shocks=None, config=None, *, dt, generator=None):
-    """QE diffusion times exp(-lambda*k*dt + N*mean + sqrt(N)*std*Z).
+    """Selected Heston step times exp(-lambda*k*dt + N*mean + sqrt(N)*std*Z).
 
     Explicit shocks have five channels: normalV, uniformV, normalS,
     PoissonCount, normalJump. The count is already sampled at lambda*dt by the

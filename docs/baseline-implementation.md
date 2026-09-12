@@ -1,5 +1,92 @@
 # Baseline implementation and qualification
 
+## Active objective: defensible basic-Heston comparison
+
+Qualify the intended literature baselines on the existing basic Heston task,
+then compare frozen policies on one fresh common test bank. Do not expand the
+benchmark or tune a proposed winner. Preserve completed native references and
+working adapters; poor scores alone do not diagnose implementation errors.
+
+- [ ] Finish the running native AlphaZero reference and use its evidence to guide the common-task transfer.
+- [ ] Qualify the original EX-DRL learner, then transfer it without the earlier undocumented method changes.
+- [ ] Add the distinct Hull/Cao 2021 two-moment DDPG method to the common task, using the completed native reference.
+- [ ] Qualify acceleration for each baseline: batch independent work, measure CPU/GPU throughput, and check reference-versus-accelerated outputs before extended training.
+- [ ] Complete missing source-supported training and seed checks; distinguish original objectives from common-objective variants.
+- [ ] Evaluate the retained baseline set on the same fresh basic bank, including ordinary delta hedging.
+- [ ] Write one source-to-implementation appendix and review code/results; keep merge and push held.
+
+New artifacts: `/home/max/Documents/hedging-gym-runs/basic-comparison-2026-09-07-h7WXZD/`.
+Independent tasks use separate environments/artifact directories and an isolated
+worktree when editing repository code. Runtime pilots and progress output guide
+compute decisions; they do not select scientific settings from test scores.
+Keep source citations, commands, settings, checkpoints and compact result notes.
+No new registry, testing framework or benchmark infrastructure is needed.
+
+### Approved continuous-control additions
+
+CrossQ, TQC and SimBaV2 join the existing basic-Heston comparison. CrossQ and TQC
+are separate algorithms, not a combined method. Reuse SB3-Contrib for the first
+two and official SimBaV2 code for the third. Rainbow is excluded from this round.
+
+- [x] Add all three methods and original papers to the baseline appendix and related-work list.
+- [x] Add minimal adapters with correct action scaling and current-threshold replay rewards.
+- [x] Verify short training, saved-state recovery and GPU throughput; source update ratios are retained.
+- [ ] Train with progress logs and checkpoints; compare frozen policies using the existing common evaluator.
+
+New artifacts and the execution checklist live in
+`/home/max/Documents/hedging-gym-runs/advanced-rl-2026-09-07-JtfPLE/`.
+These additions do not restart or interrupt the existing recovered experiments.
+Training budgets and update-to-data ratios must be reported; a fast but
+undertrained pilot is not evidence against an algorithm. Merge and push stay held.
+
+The first approved training block uses 99,840 transitions for each method and
+each of seeds 7, 17 and 29, on the unchanged training/development banks. This is
+an initial comparison, not an equal-training-budget ranking against the longer
+PPO runs. The external checklist records source settings, warmup differences,
+GPU timings and exact launch commands. No final test data selects the recipe.
+
+The [source-to-code appendix](baseline-methods.md) is drafted. Original QR-D4PG
+common-Heston seeds 17 and 29 now repeat the qualified seed-7 recipe, with
+separate logs and checkpoints. EX-DRL and the original two-moment DDPG have
+independent owners; AlphaZero's longer reference run does not block them.
+
+Acceleration is part of each adapter, not a separate research method. Keep
+objectives, updates per transition, replay rules and search budgets unchanged
+when comparing implementations; record collection-order changes explicitly.
+Use GPU batches for tensor work and CPU parallelism for independent work where
+measured throughput improves. Keep progress and checkpoints. Do not rewrite a
+donor merely to fill the GPU, or interrupt the running native AlphaZero anchor.
+
+## Current work: author-code baseline anchors
+
+Before further common-task tuning, establish the author implementations on
+their original tasks. Our unsuccessful ports do not refute their published
+results. Keep legacy dependencies and raw evidence outside this repository.
+
+- [x] Evaluate the original Cao/Chen/Hull/Poulos released weights against their matching classical hedge.
+- [x] Train and evaluate one Cao et al. distributional-RL case using the author recipe.
+- [x] Transfer the original 2023 conditional-CVaR learner to common Heston; keep this distinct from the global-ES port.
+- [x] Identify the matching AlphaZero author release and diagnose its differences from our current adapter; no speculative rewrite.
+- [ ] Run the public AlphaZero source on its released native benchmark, with fresh evaluation paths and saved policies.
+- [ ] Use the native AlphaZero result to guide an incremental Heston transfer; keep market, action and objective changes separate.
+- [ ] Save checkpoints, original commands, compatibility changes and results; review locally without merging or pushing.
+
+Evidence directory: `/home/max/Documents/hedging-gym-runs/native-rl-2026-09-07-VnrGDa/`.
+Native evaluation and independent training are distinct checks. The 2023
+repository's bundled policy/logs are short demonstrations, not paper results.
+
+The approved AlphaZero reference uses the released trinomial terminal-variance
+task: 60 dates, 21 stock holdings, fresh market draws, original shared search
+statistics and candidate acceptance. The fixed budget is 10 cycles of 1,000
+self-play episodes, 25 simulations per decision and 500 validation episodes
+per candidate/incumbent comparison. Ten cycles follows the earlier paper's
+Figure 5.2 budget; the released 60-date/feed-forward setup is not that figure's
+exact configuration. A runtime-only pilot selected CPU: its tiny-network
+inference was about four times faster than GPU. Training and independent final
+evaluation are tracked in `alphazero-native/`; the Heston AlphaZero adapter has
+not received another learning/search recipe change. Its policy-only evaluation
+now skips an unused critic calculation, with the same selected actions.
+
 Adapters use the existing batched market, observations, legal trades and cash
 ledger. The common Heston experiment adapts the source methods; it does not
 reproduce their paper tables. See [methods and sources](../methods/README.md).
@@ -124,3 +211,56 @@ reconcile to independent NumPy accounting within 1.2e-6. SB3 ZIP files establish
 inference reload parity, not exact custom-environment training continuation.
 Merge and push remain held; the weak adapters must not be used to claim a new
 method beats strong implementations of the literature.
+
+## Native source checks
+
+The original [Cao/Chen/Hull/Poulos policy](https://github.com/rotmanfinhub/deep-hedging-research/tree/b4d031a185fe2547dd81ad7a67081f6dbe52c5bc)
+was evaluated without retraining on its own GBM stock-only task. On 5,000 fresh
+paired paths it improved mean cost plus 1.5 standard deviations by **16.95%**
+over native delta hedging, close to the paper's 16.6%. Saved trades reconcile
+to independent accounting within 5.7e-13. This verifies the released policy,
+not independent training or common-Heston performance. Its objective is not ES95.
+
+The original [2023 QR-D4PG learner](https://github.com/rotmanfinhub/gamma-vega-rl-hedging/tree/77dc48326da000d983b1fb750edb2177e38c75fd)
+also completed its native GBM/2%-cost experiment: 40,000 training episodes and
+5,000 fresh paired evaluation episodes. ES95 was **14.91168 versus 21.01379**
+for delta-gamma, a **29.04% reduction**; the paper reports 15.37 versus 21.10.
+The original learner, risk objective and financial task were preserved.
+Runtime compatibility changes and progress/checkpoint additions are recorded
+externally. Paired scenarios match exactly; recorded P&L sums and saved-policy
+reload agree within floating-point tolerance. This successful single-seed native
+run is not yet evidence for the joint-action common-Heston transfer.
+
+### Why our AlphaZero result does not match the paper
+
+The fetched [public author code](https://github.com/plan64/minimalHedger_AlphaZero/tree/3111c378fcd17e45f94d2fc668a3aa117126ecba)
+belongs to Szehr's earlier MCTS paper, not the complete
+[2025 AlphaZero versus Deep Hedging comparison](https://arxiv.org/html/2510.01874v2).
+A complete official release of the latter was not located. The public repository
+also explicitly says that some training details are private.
+
+- The 2025 headline experiment used 150,000 self-play games, five decisions,
+  one stock and a squared-error objective with capped costs. Our latest
+  adaptation used 512 self-play games, 30 Heston dates, two traded assets and
+  terminal ES95, with much smaller networks and fewer policy refits. Additional
+  continuation simulations trained the critic; they do not equal self-play.
+- Probing the saved checkpoints found initial searches reached only 2–4 of 30
+  dates and never a terminal payoff. Their decisions therefore depended on
+  learned values, which were poorly calibrated for distinguishing actions.
+- The public donor reuses search statistics across self-play episodes and
+  rejects worse candidate policies. Our adapter restarts every search and
+  unconditionally retains updates, including observed policy deterioration.
+- Our critic reanalysis evaluates the fitted greedy actor, whereas the public
+  donor learns from completed search-policy trajectories. This changes the
+  training loop; it is not a literal port. No new accounting or market-chance
+  sampling defect was established by this audit.
+
+These observations explain why the present result is not a faithful test of the
+paper's claim. They identify likely performance causes, not measured benefits
+of fixes. The next repair should establish a native anchor, restore source-backed
+model selection and useful search/value training, then test the same Heston
+transfer. More compute alone is not an established solution.
+
+Detailed source locations, original commands and frozen-checkpoint probes:
+`native-rl-2026-09-07-VnrGDa/alphazero-audit/` under the external runs directory.
+The audit did not change AlphaZero code, checkpoints or training.

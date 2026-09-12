@@ -47,8 +47,8 @@ def _bounds(
         raise ValueError(f"features must have shape [batch, {feature_dim}]")
     if holdings.shape != (features.shape[0], n_assets):
         raise ValueError(f"holdings must have shape [batch, {n_assets}]")
-    lo = torch.as_tensor(lower, dtype=holdings.dtype, device=holdings.device)
-    hi = torch.as_tensor(upper, dtype=holdings.dtype, device=holdings.device)
+    lo = torch.as_tensor(-torch.inf if lower is None else lower, dtype=holdings.dtype, device=holdings.device)
+    hi = torch.as_tensor(torch.inf if upper is None else upper, dtype=holdings.dtype, device=holdings.device)
     # Finance validates the bounds and input holdings once. This hot path
     # checks shape without introducing a per-date accelerator synchronization.
     return torch.broadcast_to(lo, holdings.shape), torch.broadcast_to(hi, holdings.shape)
@@ -109,7 +109,11 @@ class DirectDHPolicy(_ConfiguredPolicy):
     ) -> PolicyAction:
         del deterministic, generator  # Both policies share the rollout interface.
         lo, hi = _bounds(features, holdings, lower, upper, self.feature_dim, self.n_assets)
-        target = lo + (hi - lo) * self.continuous(features).sigmoid()
+        raw = self.continuous(features)
+        finite = lo.isfinite() & hi.isfinite()
+        safe_lo, safe_hi = torch.where(finite, lo, 0.), torch.where(finite, hi, 0.)
+        bounded = safe_lo + (safe_hi - safe_lo) * raw.sigmoid()
+        target = torch.where(finite, bounded, raw).clamp(min=lo, max=hi)
         modes = torch.where(
             target > holdings, BUY, torch.where(target < holdings, SELL, HOLD),
         )
@@ -132,6 +136,8 @@ class NoTransactionBandPolicy(_ConfiguredPolicy):
         *, initial_width_logit: float = -3.0,
     ):
         super().__init__(config)
+        if config.execution.holding_lower is None or config.execution.holding_upper is None:
+            raise ValueError("this band parameterization requires finite holding bounds")
         self.continuous = _network(self.feature_dim, 3 * self.n_assets, hidden)
         # Narrow initial bands avoid an initial always-hold policy with zero
         # pathwise learning signal. Tune the width on development data.

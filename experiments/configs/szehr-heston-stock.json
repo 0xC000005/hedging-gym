@@ -1,0 +1,31 @@
+{
+  "market": {
+    "model": "heston",
+    "scheme": "qe_m",
+    "spot0": 1.0,
+    "v0": 0.04,
+    "r": 0.0,
+    "q": 0.0,
+    "kappa": 1.0,
+    "theta": 0.04,
+    "sigma": 2.0,
+    "rho": -0.7
+  },
+  "time_grid": {"n_steps": 60, "days_per_year": 365},
+  "portfolio": {
+    "liability": {"strike": 1.0, "maturity": 0.1643835616438356, "kind": "call"},
+    "hedges": [],
+    "liability_quantity": 1.0
+  },
+  "execution": {
+    "proportional": 0.0,
+    "quadratic": 0.0,
+    "fixed_ticket": 0.0,
+    "minimum_commission": 0.0,
+    "minimum_trade": 0.0,
+    "trade_lot": 0.0,
+    "holding_lower": -1.0,
+    "holding_upper": 1.0
+  },
+  "risk": {"alpha": 0.95, "objective": "mse"}
+}

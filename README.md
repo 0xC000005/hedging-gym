@@ -7,8 +7,9 @@ markets, Gymnasium and PyTorch interfaces, one cash ledger, and terminal-loss
 evaluation. Market parameters, portfolio, time grid, execution rules and risk
 level are configured separately.
 
-This is a private **v0.1 research alpha**. The supported book contains one stock
-and configurable European options at zero rates and dividends. Numerical and
+This is a private **v0.1 research alpha**. The book contains one stock and
+configurable claims at zero rates and dividends. Built-ins include European
+options and a variance swap; users can supply their own instruments. Numerical and
 API checks cover selected cases; Bates tail-risk precision remains incomplete.
 
 ## Start here
@@ -39,7 +40,7 @@ observed, _ = env.reset_tensor(seed=42)
 targets = torch.zeros(
     (env.num_envs, config.n_assets), device=observed.device, dtype=observed.dtype
 )
-for _ in range(config.time_grid.n_steps):
+for _ in range(config.n_decisions):
     observed, reward, terminated, truncated, info = env.step_tensor(targets)
 
 print("Terminal loss ES:", empirical_es(info["terminal_loss"], config.risk.alpha))
@@ -54,6 +55,10 @@ Optimizing mean reward and minimizing expected shortfall are different objective
   tensor and Gym interfaces, and first checks.
 - [Benchmark](docs/benchmark.md): defaults, financial equations, execution
   presets and observed regime changes.
+- [Paper configurations](docs/paper-benchmarks.md): Bühler Heston, AlphaZero
+  Heston and AlphaZero GBM.
+- [Custom instruments](docs/custom-instruments.md): add a priced claim or choose
+  a different settlement convention.
 - [Validation](docs/validation.md): reproducible checks and their limits.
 - [Methods](methods/README.md): classical controls and trainable baseline adapters.
 - [Related work](docs/related-work.md): papers and numerical implementations.

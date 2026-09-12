@@ -41,6 +41,8 @@ def _parser():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--device", default="cpu", choices=("cpu", "cuda"))
     parser.add_argument("--model", default="heston", choices=("gbm", "heston", "bates"))
+    parser.add_argument("--scheme", choices=("qe", "qe_m"),
+                        help="Heston/Bates simulation; use qe for legacy checkpoints (new runs default to qe_m)")
     parser.add_argument("--methods", nargs="+", choices=("all", *METHOD_LABELS), default=["dh", "ntb"])
     parser.add_argument("--preset", default="basic",
                         choices=("basic", "operational_fixed", "operational_minimum_fee"))
@@ -113,6 +115,10 @@ def main(argv=None):
     config = benchmark_config(model=args.model, name=args.preset,
         time_grid=TimeGrid(n_steps=args.steps, days_per_year=args.days_per_year),
         risk=RiskConfig() if args.risk_alpha is None else RiskConfig(alpha=args.risk_alpha))
+    if args.scheme is not None:
+        if args.model == "gbm":
+            raise ValueError("--scheme applies to Heston/Bates; GBM has exact lognormal steps")
+        config = replace(config, market=replace(config.market, scheme=args.scheme))
     methods = list(METHOD_LABELS) if "all" in args.methods else list(dict.fromkeys(args.methods))
     # Planner variants share a trained continuation, without retraining/cost duplication.
     training_methods = [method for method in methods if method not in {"cem", "hpo_cem", "hpo_gradient"}]

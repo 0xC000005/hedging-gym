@@ -57,6 +57,18 @@ def test_chance_outcomes_are_averaged_and_tree_reaches_terminal_states():
     assert result["work"]["terminal_evaluations"] > 0
     assert result["policy"][0] > result["policy"][1]
 
+    # Batching independent roots must not delay an individual tree's backups
+    # or mix its random stream with another root.
+    seeds = (3, 7, 11)
+    batched = stochastic_search_batch([(0, 0)]*len(seeds), ThreeStepModel(),
+        [np.random.default_rng(seed) for seed in seeds], simulations=64)
+    for seed, together in zip(seeds, batched):
+        alone, = stochastic_search_batch([(0, 0)], ThreeStepModel(),
+            [np.random.default_rng(seed)], simulations=64)
+        np.testing.assert_array_equal(together["visits"], alone["visits"])
+        assert together["value"] == alone["value"]
+        assert together["work"] == alone["work"]
+
 
 @pytest.mark.parametrize("extra_option", [False, True])
 def test_search_respects_instrument_geometry_constraints_and_ledger(extra_option):
