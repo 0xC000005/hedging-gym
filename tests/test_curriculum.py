@@ -50,6 +50,12 @@ def test_curriculum_resume_matches_uninterrupted(tmp_path, sampler):
     full, fm = train_task_curriculum(policy, banks, updates=4, **options)
     path = tmp_path / "latest.pt"
     train_task_curriculum(policy, banks, updates=2, checkpoint_path=path, **options)
+    legacy = torch.load(path, weights_only=False)
+    for config in legacy["source_configs"]:
+        config["time_grid"].pop("trade_at_maturity")
+        config["time_grid"].pop("step_days")
+        config.pop("settlement")
+    torch.save(legacy, path)
     resumed, rm = train_task_curriculum(policy, banks, updates=4,
         checkpoint_path=path, resume_from=path, **options)
     for name, value in full.state_dict().items():

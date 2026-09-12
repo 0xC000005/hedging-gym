@@ -87,7 +87,7 @@ def prepare_banks(args):
             seed = base_seed+index
             if path.exists():
                 old = torch.load(path, map_location="cpu", weights_only=False)
-                if old["config"] != asdict(config) or old["seed"] != seed or len(old["spot"]) != paths:
+                if config_from_dict(old["config"]) != config or old["seed"] != seed or len(old["spot"]) != paths:
                     raise ValueError("bank differs from frozen settings")
                 continue
             started = time.perf_counter()

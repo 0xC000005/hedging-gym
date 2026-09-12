@@ -4,13 +4,14 @@ import itertools
 from copy import deepcopy
 
 import numpy as np
+import pytest
 import torch
 
 from hedging_gym.benchmark import benchmark_config, operational_config
 from hedging_gym.config import RiskConfig, TimeGrid
 from hedging_gym.finance import generate_market_bank, numpy_ledger
 from hedging_gym.gym_env import TensorHedgingEnv
-from methods.counterfactual import counterfactual_rollout, mode_loss
+from methods.counterfactual import counterfactual_rollout, mode_loss, train_counterfactual
 from methods.hybrid import HybridPolicy
 
 
@@ -104,3 +105,13 @@ def test_two_date_counterfactual_gradient_matches_exact_policy_risk():
     for expected, actual in zip(exact, estimate):
         torch.testing.assert_close(actual, expected, rtol=1e-9, atol=1e-11)
     assert any(gradient.abs().max() > 1e-8 for gradient in exact)
+
+
+def test_counterfactual_rejects_maturity_decisions_before_branching_or_training():
+    config = benchmark_config(model="gbm", time_grid=TimeGrid(n_steps=1, trade_at_maturity=True))
+    bank = generate_market_bank(config, 2, 173)
+    policy = HybridPolicy(config, hidden=(4,))
+    with pytest.raises(ValueError, match="do not support trading at maturity"):
+        counterfactual_rollout(policy, bank, time_index=0)
+    with pytest.raises(ValueError, match="do not support trading at maturity"):
+        train_counterfactual(policy, bank, algorithm="all_mode", zeta=0., updates=1, progress=False)

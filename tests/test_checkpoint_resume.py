@@ -34,6 +34,25 @@ def test_legacy_qe_checkpoint_and_bank_cannot_resume_as_qe_m(tmp_path):
         _load_bank(bank, modern, 19, "cpu")
 
 
+def test_legacy_pickled_market_uses_instance_fields_and_preserves_contract():
+    from copy import deepcopy
+    from experiments.compare_fast_adaptation import SOURCE_MARKETS, market_config
+    from methods.checkpoints import saved_config, saved_market
+
+    config = market_config(SOURCE_MARKETS[0])
+    old = deepcopy(config)
+    vars(old.market).pop("scheme")
+    vars(old).pop("settlement")
+    assert old.market.scheme == "qe_m"  # Today's class fallback is not saved evidence.
+    assert saved_market(old.market) == config.market
+    assert saved_config(old) == config
+    assert saved_market(asdict(config.market)) == config.market
+    assert saved_market(None) is None
+    assert config.market.scheme == "qe" and config.market.kappa == 3.
+    assert config.risk.objective == "es" and config.n_assets == 2
+    assert config.time_grid.days_per_year == 252 and config.n_decisions == 30
+
+
 @pytest.mark.parametrize("method", ["dh", "ntb", "hpo"])
 def test_split_training_matches_uninterrupted(method, tmp_path):
     bank = generate_market_bank(benchmark_config(model="gbm", time_grid=TimeGrid(n_steps=3)),

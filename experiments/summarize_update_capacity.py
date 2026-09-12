@@ -1,7 +1,6 @@
 """Audit matched adaptation checkpoints and summarize their common-path losses."""
 
 import argparse
-from dataclasses import asdict
 import json
 from pathlib import Path
 
@@ -10,6 +9,7 @@ import torch
 
 from experiments.summarize_fast_adaptation import SEEDS, es95, interval
 from experiments.qualify_adaptation import load_bank
+from hedging_gym.config import config_from_dict
 from hedging_gym.finance import bank_subset, numpy_ledger
 
 
@@ -89,7 +89,7 @@ def main():
                     require(curve["policy_seed"] == seed and curve["target"] == target
                             and curve["mode"] == mode and curve["batch_size"] == 256
                             and curve["minibatch_seed"] == seed+101003
-                            and curve["config"] == json.loads(json.dumps(asdict(bank.config))), f"recipe: {label}")
+                            and config_from_dict(curve["config"]) == bank.config, f"recipe: {label}")
                     require(sorted(r["updates"] for r in curve["milestones"]) == list(BUDGETS), f"milestones: {label}")
                     row = next(r for r in curve["milestones"] if r["updates"] == budget)
                     tape = load(directory/mode/f"{budget}-tape.pt")

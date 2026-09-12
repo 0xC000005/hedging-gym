@@ -20,7 +20,7 @@ import torch
 from hedging_gym.evaluation import empirical_es
 from hedging_gym.finance import bank_subset, bank_to
 from .checkpoints import (check_resume_options, due_checkpoint, load_checkpoint,
-                          restore_rng, rng_state, save_checkpoint)
+                          restore_rng, rng_state, save_checkpoint, saved_config)
 from .training import _report, _sync, rollout
 
 
@@ -64,6 +64,8 @@ def train_task_curriculum(source_policy, train_banks, *, sampler, teacher_scores
     if len(banks) < 2 or min(updates, batch_size, score_paths, score_every, checkpoint_every) < 1:
         raise ValueError("at least two tasks and positive work settings are required")
     config = banks[0].config
+    if config.risk.objective != "es":
+        raise ValueError("task curriculum is a terminal-ES experiment")
     for bank in banks:
         if replace(bank.config, market=config.market) != config or len(bank.spot) < score_paths:
             raise ValueError("tasks must share book, clock, execution and risk, with enough score paths")
@@ -101,7 +103,8 @@ def train_task_curriculum(source_policy, train_banks, *, sampler, teacher_scores
     if resume_from:
         saved = load_checkpoint(resume_from, method="task_curriculum", config=config)
         check_resume_options(saved, options)
-        if saved["source_configs"] != source_configs or saved["seed"] != seed:
+        if ([saved_config(value) for value in saved["source_configs"]] != [bank.config for bank in banks]
+                or saved["seed"] != seed):
             raise ValueError("resume requires the saved task configurations and seed")
         if sampler == "pooled_ru_regret" and not torch.equal(
                 saved["teacher_losses"], teacher_losses.cpu()):

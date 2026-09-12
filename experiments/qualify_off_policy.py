@@ -98,7 +98,7 @@ def main():
         parser.error("requested assessment subset exceeds the saved bank")
     development = bank_subset(development, slice(0, args.development_paths))
     args.output_dir.mkdir(parents=True, exist_ok=True)
-    steps_per_phase = args.episodes_per_phase * training.config.n_steps
+    steps_per_phase = args.episodes_per_phase * training.config.n_decisions
     total = args.phases * steps_per_phase
     recipe = dict(arguments={k: str(v) if isinstance(v, Path) else v for k,v in vars(args).items()},
         config=asdict(training.config), transitions=total, gamma=1., train_freq=1,
@@ -137,7 +137,7 @@ def main():
         train_started, updates_before = time.perf_counter(), model._n_updates
         if phase:
             model.learn(steps_per_phase, reset_num_timesteps=False,
-                callback=Progress(total, args.envs*training.config.n_steps))
+                callback=Progress(total, args.envs*training.config.n_decisions))
         training_seconds = time.perf_counter()-train_started if phase else 0.
         record = assess(model, training, development, args, phase)
         set_risk_threshold(model, env, record["zeta"])

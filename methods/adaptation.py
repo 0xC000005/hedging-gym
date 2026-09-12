@@ -14,6 +14,7 @@ only the current stage's training bank, after its pre-update evaluation.
 """
 
 from dataclasses import asdict, replace
+import math
 import time
 
 import torch
@@ -21,7 +22,7 @@ from torch import nn
 
 from hedging_gym.finance import bank_subset, bank_to
 from .checkpoints import (check_resume_options, due_checkpoint, load_checkpoint,
-                          restore_rng, rng_state, save_checkpoint)
+                          restore_rng, rng_state, save_checkpoint, saved_config, saved_market)
 from .policies import BUY, HOLD, SELL, PolicyAction, _ConfiguredPolicy, _bounds, _network
 from .training import _report, _sync, rollout, train_policy
 
@@ -42,6 +43,9 @@ class TaskEmbeddedPolicy(_ConfiguredPolicy):
 
     def __init__(self, config, *, n_tasks, embedding_dim=4, hidden=(32, 32)):
         super().__init__(config)
+        if not all(math.isfinite(value) for name in ("holding_lower", "holding_upper")
+                   for value in config.execution.vector(name, config.n_assets)):
+            raise ValueError("task-embedding adaptation requires finite holding bounds")
         if n_tasks < 1 or embedding_dim < 1:
             raise ValueError("positive task count and embedding dimension required")
         self.shared = _network(self.feature_dim + embedding_dim, self.n_assets, hidden)
@@ -139,7 +143,8 @@ def train_multitask(train_banks, *, seed=7, updates=8, batch_size=32,
     if resume_from is not None:
         saved = load_checkpoint(resume_from, method=method_name, config=config)
         check_resume_options(saved, options)
-        if (saved["seed"] != seed or saved["source_configs"] != source_configs
+        if (saved["seed"] != seed
+                or [saved_config(value) for value in saved["source_configs"]] != [bank.config for bank in banks]
                 or saved["source_paths"] != [len(bank.spot) for bank in banks]):
             raise ValueError("resume requires the saved seed, source markets and bank sizes")
         policy.load_state_dict(saved["policy"])
@@ -279,7 +284,7 @@ class AdaptationUpdater:
         self._new_optimizer()
         self.optimizer.load_state_dict(saved["optimizer"])
         self.index_generator.set_state(saved["index_rng"])
-        self.last_market, self.history = saved["last_market"], saved["history"]
+        self.last_market, self.history = saved_market(saved["last_market"]), saved["history"]
         self.pending_call, self.completed_steps = saved["pending_call"], saved["completed_steps"]
         restore_rng(saved["rng"])
 

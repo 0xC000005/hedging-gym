@@ -13,14 +13,21 @@ between author-code references, common-task transfers and diagnostic ports.
 | `classical.py` | Current model-price sensitivities and bounded stock/option hedge targets |
 | `controllers.py` | Common evaluation interface for classical controls and frozen policies |
 | `policies.py` | Direct bounded holdings and learned no-transaction bands |
-| `training.py` | Causal rollouts and a shared terminal expected-shortfall objective |
+| `training.py` | Causal rollouts and the configured terminal ES or MSE objective |
 | `checkpoints.py` | Trusted-local snapshot files and RNG state; each learner owns its training state |
 | `model_free.py` | Quantile D4PG and EX-D4PG with a generalized-Pareto tail |
 | `sb3.py` | Stock SB3 algorithms through a thin batched VecEnv/action-coordinate adapter |
+| `off_policy.py` | Optional upstream CrossQ/TQC with terminal-ES replay relabeling and full continuation snapshots |
+| `simbav2.py` | Optional pinned official SimBaV2 learner, terminal-ES transfer and donor-state recovery |
+| `hull_ddpg.py` | Distinct Hull/Cao 2021 two-moment DDPG source transfer |
 | `adaptation.py` | Full-network fine-tuning and task-embedding adaptation |
+| `geps.py`, `skill_retrieval.py`, `belief_adaptation.py` | Experimental context operators, retrieval initialization and inferred market context |
 | `meta_pretraining.py` | First-order post-adaptation training, with a zero-inner-update ordinary control |
 | `amago_adapter.py` | Optional official AMAGO/AMAGO-2 cross-book memory qualification |
+| `counterfactual.py`, `joint_counterfactual.py` | Experimental shared-continuation discrete-mode credit assignment |
+| `curriculum.py` | Experimental task sampling with importance-weighted pooled ES |
 | `alphazero.py` | Stochastic PUCT, learned policy/value and search-improvement training |
+| `source_alphazero.py` | Separate pinned author MCTS/trainer bridge for explicitly configured source-loop checks |
 | `hybrid.py` | Discrete HOLD/TRADE choices with pathwise sizing and categorical PPO |
 | `planning.py` | CEM root-action improvement, feedback rollouts and optional gradient refinement |
 
@@ -131,8 +138,10 @@ not a claim to reproduce their original experiments.
 
 The approved additions are **CrossQ**, **TQC** and **SimBaV2**, all with continuous
 hedge actions. CrossQ and TQC use SB3-Contrib; SimBaV2 uses the authors' JAX
-implementation. They are being qualified, not yet reported as trained or
-competitive baselines. Their papers and source links are in
+implementation. Their three-seed, 99,840-transition initial runs are complete;
+the weak policies are not competitively qualified. Historical basic-QE results
+do not validate current paper presets. See [current qualification status](../docs/baseline-implementation.md).
+Their papers and source links are in
 [related work](../docs/related-work.md), and their objective mappings are in the
 [implementation appendix](../docs/baseline-methods.md). Rainbow is not part of
 this addition because it would require a discretized hedge-action set.

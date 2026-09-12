@@ -1,5 +1,6 @@
 """Behavior at the replay/ledger boundary and exact CPU training continuation."""
 from copy import deepcopy
+from dataclasses import replace
 
 import numpy as np
 import pytest
@@ -7,7 +8,7 @@ import torch
 
 pytest.importorskip("sb3_contrib")
 from hedging_gym import benchmark_config
-from hedging_gym.config import TimeGrid
+from hedging_gym.config import RiskConfig, TimeGrid
 from hedging_gym.evaluation import evaluate_controller
 from hedging_gym.finance import generate_market_bank, numpy_ledger
 from methods.sb3 import SB3HedgingVecEnv
@@ -51,6 +52,14 @@ def test_replay_relabels_only_terminal_rewards_at_current_threshold():
         torch.where(after.dones.bool(), -bank.config.risk.loss(losses, .12), 0.))
 
 
+def test_es_replay_adapter_rejects_mse():
+    config = replace(benchmark_config(model="gbm", time_grid=TimeGrid(n_steps=2)),
+                     risk=RiskConfig(objective="mse"))
+    env = SB3HedgingVecEnv(generate_market_bank(config, 4, 42), 2)
+    with pytest.raises(ValueError, match="terminal ES only"):
+        build_off_policy("tqc", env)
+
+
 def assert_state_equal(left, right):
     if isinstance(left, torch.Tensor):
         torch.testing.assert_close(left, right, atol=0, rtol=0)
@@ -77,6 +86,11 @@ def test_stock_training_resume_and_independent_ledger(algorithm, tmp_path):
     assert model._n_updates == 12  # One update per transition, not per vector step.
     set_risk_threshold(model, env, .03)
     save_off_policy(model, env, tmp_path / "checkpoint", runner_state={"phase": 1})
+    legacy = torch.load(tmp_path / "checkpoint" / "runtime.pt", weights_only=False)
+    vars(legacy["config"].time_grid).pop("trade_at_maturity")
+    vars(legacy["config"].time_grid).pop("step_days")
+    vars(legacy["config"]).pop("settlement")
+    torch.save(legacy, tmp_path / "checkpoint" / "runtime.pt")
     model.learn(12, reset_num_timesteps=False)
     expected = deepcopy(model.get_parameters())
     expected_entropy = model.log_ent_coef.detach().clone()

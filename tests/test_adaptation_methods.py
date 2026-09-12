@@ -1,15 +1,17 @@
 """Adaptation must change the advertised parameters, never evaluation state."""
 
 from dataclasses import replace
+from copy import deepcopy
 
 import numpy as np
+import pytest
 import torch
 
 from hedging_gym.benchmark import benchmark_config, evaluate_adaptation
 from hedging_gym.config import TimeGrid
 from hedging_gym.evaluation import evaluate_controller
 from hedging_gym.finance import generate_market_bank
-from methods.adaptation import AdaptationUpdater, train_multitask, train_online_finetune
+from methods.adaptation import AdaptationUpdater, TaskEmbeddedPolicy, train_multitask, train_online_finetune
 from methods.controllers import policy_controller
 
 
@@ -18,6 +20,26 @@ def _banks():
     other = replace(config, market=replace(config.market, v0=.0625))
     return (generate_market_bank(config, 24, 101, dtype=torch.float64),
             generate_market_bank(other, 24, 102, dtype=torch.float64))
+
+
+def test_saved_pre_scheme_market_matches_adaptation_stage():
+    config = benchmark_config(time_grid=TimeGrid(n_steps=2))
+    config = replace(config, market=replace(config.market, scheme="qe"))
+    policy = TaskEmbeddedPolicy(config, n_tasks=2, hidden=(8,))
+    updater = AdaptationUpdater(policy, progress=False)
+    updater.last_market = config.market
+    state = deepcopy(updater.state_dict())
+    vars(state["last_market"]).pop("scheme")
+    updater.load_state_dict(state)
+    assert updater.last_market == config.market
+    assert updater.last_market.scheme == "qe"
+
+
+def test_embedding_adapter_rejects_unbounded_task_before_nan_actions():
+    config = benchmark_config(model="gbm")
+    config = replace(config, execution=replace(config.execution, holding_upper=None))
+    with pytest.raises(ValueError, match="finite holding bounds"):
+        TaskEmbeddedPolicy(config, n_tasks=2)
 
 
 def test_online_finetuning_changes_weights_and_preserves_adam_across_stages():
@@ -98,6 +120,12 @@ def test_multitask_and_mid_call_adaptation_resume_exactly(tmp_path):
     full, full_metadata = train_multitask(banks, updates=6, **options)
     path = tmp_path / "pretrain.pt"
     train_multitask(banks, updates=3, checkpoint_path=path, **options)
+    legacy = torch.load(path, weights_only=False)
+    for config in legacy["source_configs"]:
+        config["time_grid"].pop("trade_at_maturity")
+        config["time_grid"].pop("step_days")
+        config.pop("settlement")
+    torch.save(legacy, path)
     resumed, metadata = train_multitask(banks, updates=6, resume_from=path, **options)
     for first, second in zip(full.parameters(), resumed.parameters()):
         torch.testing.assert_close(first, second, rtol=0., atol=0.)

@@ -73,10 +73,9 @@ layers, the inherited context-only freeze/update contract, and a tiny common
 ledger rollout. The author test needs `GEPS_DONOR_ROOT`; without it only that
 source-dependent test is skipped.
 
-These checks qualify equations and integration; financial performance is
-measured separately by `experiments.compare_fast_adaptation`.
 These checks qualify equations and integration, not native PDE performance or
-financial superiority. No full training belongs to this implementation gate.
+financial superiority. Financial performance is measured separately by
+`experiments.compare_fast_adaptation`; no full training belongs to this implementation gate.
 
 On 2026-09-08, the source-dependent tests and existing adaptation tests passed:
 `8 passed`, using the existing hedging-gym virtualenv, CPU, two OpenMP/MKL

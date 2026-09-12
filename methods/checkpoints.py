@@ -3,10 +3,31 @@
 Training state belongs to each method; this module only handles files and RNG.
 Checkpoint files can contain Python objects. Load only artifacts you trust.
 """
+from dataclasses import asdict
 from pathlib import Path
 
 import torch
-from hedging_gym.config import config_from_dict
+from hedging_gym.config import config_from_dict, market_from_dict
+
+
+def saved_market(value):
+    """Recover pre-scheme pickled objects without inheriting today's QE-M default."""
+    if value is None:
+        return None
+    # asdict/getattr would materialize a newly added class default on old objects.
+    fields = value if isinstance(value, dict) else dict(vars(value), model=value.model)
+    return market_from_dict(fields)
+
+
+def saved_config(value):
+    """Normalize trusted-local dictionary or historical dataclass contracts."""
+    if isinstance(value, dict):
+        return config_from_dict(value)
+    # A field added with default_factory (settlement) has no class fallback.
+    # Only materialize top-level fields present in the old instance.
+    fields = {name: asdict(item) for name, item in vars(value).items()}
+    fields["market"] = asdict(saved_market(value.market))
+    return config_from_dict(fields)
 
 
 def rng_state():
@@ -36,7 +57,7 @@ def save_checkpoint(path, payload):
 def load_checkpoint(path, *, method, config):
     saved = torch.load(path, map_location="cpu", weights_only=False)
     # New optional config fields must not invalidate an unchanged older task.
-    if saved["method"] != method or config_from_dict(saved["config"]) != config:
+    if saved["method"] != method or saved_config(saved["config"]) != config:
         raise ValueError("checkpoint method or financial configuration differs")
     return saved
 

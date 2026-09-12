@@ -13,10 +13,10 @@ from pathlib import Path
 import torch
 
 from hedging_gym.benchmark import adaptation_configs
-from hedging_gym.config import config_from_dict
 from hedging_gym.evaluation import evaluate_controller
 from hedging_gym.finance import BANK_FIELDS, MarketBank, generate_market_bank
 from methods.adaptation import AdaptationUpdater, train_multitask
+from methods.checkpoints import saved_config
 from methods.controllers import policy_controller
 from methods.policies import DirectDHPolicy
 from methods.training import _report
@@ -24,9 +24,7 @@ from methods.training import _report
 
 def load_bank(path):
     saved = torch.load(path, map_location="cpu", weights_only=False)
-    config = saved["config"]
-    if isinstance(config, dict):
-        config = config_from_dict(config)
+    config = saved_config(saved["config"])
     return MarketBank(*(saved[key] for key in BANK_FIELDS), config)
 
 

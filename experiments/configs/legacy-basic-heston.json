@@ -1,0 +1,12 @@
+{
+  "market": {"spot0": 1.0, "v0": 0.04, "r": 0.0, "q": 0.0, "kappa": 3.0, "theta": 0.04, "sigma": 0.3, "rho": -0.5, "scheme": "qe", "model": "heston"},
+  "time_grid": {"n_steps": 30, "days_per_year": 252, "step_days": 1, "trade_at_maturity": false},
+  "portfolio": {
+    "liability": {"strike": 1.0, "maturity": 0.11904761904761904, "kind": "call"},
+    "hedges": [{"strike": 1.0, "maturity": 0.23809523809523808, "kind": "call"}],
+    "liability_quantity": 1.0, "initial_cash": null, "initial_positions": null
+  },
+  "execution": {"proportional": [0.0005, 0.01], "quadratic": 0.0, "fixed_ticket": 0.0, "minimum_commission": 0.0, "minimum_trade": 0.0, "trade_lot": 0.0, "holding_lower": [-1.0, -1.0], "holding_upper": [2.0, 1.0], "per_unit": 0.0, "commission_cap": 0.0},
+  "risk": {"alpha": 0.95, "objective": "es"},
+  "settlement": {"mode": "liquidate", "charge_liquidation_costs": true}
+}

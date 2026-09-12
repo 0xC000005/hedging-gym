@@ -22,6 +22,7 @@ from experiments.summarize_fast_adaptation import es95
 from experiments.qualify_adaptation import load_bank
 from hedging_gym.config import config_from_dict
 from hedging_gym.finance import bank_subset, numpy_ledger
+from methods.checkpoints import saved_market
 
 
 def require(condition, message):
@@ -258,7 +259,7 @@ def summarize(output, development):
                                 state = saved["updater"]
                                 require(saved["step"] == state["completed_steps"] == budget
                                         and state["pending_call"] is None and state["mode"] == mode
-                                        and state["last_market"] == bank.config.market,
+                                        and saved_market(state["last_market"]) == bank.config.market,
                                         f"final checkpoint adaptation state mismatch: {path}")
                                 require(torch.equal(state["index_rng"], final_rngs[seed, count]),
                                         f"final checkpoint minibatch RNG mismatch: {path}")

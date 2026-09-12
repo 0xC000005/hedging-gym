@@ -34,9 +34,15 @@ class TransferRiskPredictor(nn.Module):
         super().__init__()
         configs = tuple(source_configs)
         self.market_model = configs[0].market.model
-        self.fields = tuple(key for key in asdict(configs[0].market) if key != "model")
+        self.market_scheme = getattr(configs[0].market, "scheme", None)
+        # Scheme is a categorical contract, not a numeric predictor input. Keep
+        # the original feature order and checkpoint width for pre-scheme runs.
+        self.fields = tuple(key for key in asdict(configs[0].market)
+                            if key not in ("model", "scheme"))
         if len(configs) < 2 or any(c.market.model != self.market_model for c in configs):
             raise ValueError("retrieval needs at least two source tasks from one market family")
+        if any(getattr(c.market, "scheme", None) != self.market_scheme for c in configs):
+            raise ValueError("retrieval source tasks must use the same market scheme")
         source = torch.tensor([[getattr(c.market, key) for key in self.fields]
                                for c in configs])
         scale = source.std(dim=0, correction=0)
@@ -56,6 +62,8 @@ class TransferRiskPredictor(nn.Module):
     def features(self, config):
         if config.market.model != self.market_model:
             raise ValueError("retrieval does not extrapolate between market model families")
+        if getattr(config.market, "scheme", None) != self.market_scheme:
+            raise ValueError("retrieval target must use the source market scheme")
         return self.source_features.new_tensor([getattr(config.market, key) for key in self.fields])
 
     def forward(self, source_features, target_features):

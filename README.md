@@ -61,6 +61,8 @@ Optimizing mean reward and minimizing expected shortfall are different objective
   a different settlement convention.
 - [Validation](docs/validation.md): reproducible checks and their limits.
 - [Methods](methods/README.md): classical controls and trainable baseline adapters.
+- [Integration review](docs/integration-review.md): retained research branches,
+  historical checkpoint compatibility and current qualification boundaries.
 - [Related work](docs/related-work.md): papers and numerical implementations.
 
 The installable package contains the environment and evaluator. Learners in

@@ -44,7 +44,7 @@ def prepare_banks(args):
         if path.exists():
             saved = torch.load(path, weights_only=False, map_location="cpu")
             if (saved["seed"] != seed or len(saved["spot"]) != count
-                    or saved["config"] != asdict(config)):
+                    or config_from_dict(saved["config"]) != config):
                 raise ValueError("existing bank differs; choose a new output directory")
             continue
         _report("bank_start", target=name, role=role, paths=count, seed=seed,

@@ -19,6 +19,7 @@ import time
 
 import torch
 
+from hedging_gym.config import config_from_dict
 from hedging_gym.finance import bank_subset, bank_to
 from .adaptation import AdaptationUpdater, TaskEmbeddedPolicy, _continuous_contract
 from .checkpoints import load_checkpoint, restore_rng, rng_state, save_checkpoint
@@ -111,6 +112,8 @@ def train_adapt_aware(policy, metadata, source_banks, *, seed=7, episodes=600,
     if outer_loss == "ru" and zeta_lr <= 0:
         raise ValueError("RU threshold learning rate must be positive")
     config = banks[0].config
+    if config.risk.objective != "es":
+        raise ValueError("adaptation-aware pretraining supports only the terminal ES objective")
     _continuous_contract(config)
     for bank in banks:
         if replace(bank.config, market=config.market) != config:
@@ -140,10 +143,12 @@ def train_adapt_aware(policy, metadata, source_banks, *, seed=7, episodes=600,
         options.update(outer_loss=outer_loss, zeta_lr=zeta_lr, threshold_gradient_clip=5.,
                        clipping="separate policy and source-threshold gradient norms")
     source_configs = [asdict(bank.config) for bank in banks]
+    source_contracts = [bank.config for bank in banks]
     source_paths = [len(bank.spot) for bank in banks]
-    for key, actual in (("source_configs", source_configs), ("source_paths", source_paths)):
-        if key in metadata and metadata[key] != actual:
-            raise ValueError("adaptation-aware pretraining requires the declared original source banks")
+    if (("source_configs" in metadata and
+            [config_from_dict(values) for values in metadata["source_configs"]] != source_contracts)
+            or ("source_paths" in metadata and metadata["source_paths"] != source_paths)):
+        raise ValueError("adaptation-aware pretraining requires the declared original source banks")
     initial_metadata = deepcopy(metadata)
     policy.active_task = None
     policy.shared.requires_grad_(True)
@@ -164,7 +169,8 @@ def train_adapt_aware(policy, metadata, source_banks, *, seed=7, episodes=600,
         prior_options = {key: value for key, value in saved["options"].items() if key != "episodes"}
         current_options = {key: value for key, value in options.items() if key != "episodes"}
         if (prior_options != current_options or saved["seed"] != seed
-                or saved["source_configs"] != source_configs or saved["source_paths"] != source_paths):
+                or [config_from_dict(values) for values in saved["source_configs"]] != source_contracts
+                or saved["source_paths"] != source_paths):
             raise ValueError("resume requires the saved recipe, seed and source banks")
         completed = saved["step"]
         if completed > episodes:

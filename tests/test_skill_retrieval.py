@@ -3,6 +3,7 @@
 from copy import deepcopy
 from dataclasses import replace
 
+import pytest
 import torch
 
 from hedging_gym.benchmark import benchmark_config
@@ -91,6 +92,20 @@ def test_retrieval_ranks_predicted_risk_without_mutating_context():
     assert nearest_context(retriever, banks[0].config) == 0
     assert nearest_context(retriever, banks[1].config) == 1
     torch.testing.assert_close(policy.embedding, before, rtol=0., atol=0.)
+
+
+def test_retrieval_keeps_numeric_checkpoint_width_and_rejects_scheme_changes():
+    base = benchmark_config()
+    base = replace(base, market=replace(base.market, scheme="qe"))
+    other = replace(base, market=replace(base.market, v0=.09))
+    retriever = TransferRiskPredictor((base, other))
+    assert retriever.source_features.shape == (2, 8)
+    assert torch.isfinite(retriever.predict_scores(other)).all()
+    changed = replace(other, market=replace(other.market, scheme="qe_m"))
+    with pytest.raises(ValueError, match="source tasks.*scheme"):
+        TransferRiskPredictor((base, changed))
+    with pytest.raises(ValueError, match="target.*scheme"):
+        retriever.predict_scores(changed)
 
 
 def test_fit_preserves_labels_optimizer_and_source_only_normalization(tmp_path):

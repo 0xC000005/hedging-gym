@@ -1,5 +1,6 @@
 """Optional official-donor tests; SIMBAV2_SOURCE selects the pinned checkout."""
 import copy
+from dataclasses import replace
 import os
 
 import numpy as np
@@ -8,8 +9,17 @@ import torch
 
 from hedging_gym import benchmark_config
 from hedging_gym.finance import generate_market_bank
-from hedging_gym.config import TimeGrid
+from hedging_gym.config import RiskConfig, TimeGrid
 from methods.simbav2 import RawLossReplay
+
+
+def test_simba_rejects_unsupported_contract_before_loading_donor():
+    from methods.simbav2 import SimBaV2Hedger
+    config = benchmark_config(model="gbm")
+    with pytest.raises(ValueError, match="terminal ES only"):
+        SimBaV2Hedger(replace(config, risk=RiskConfig(objective="mse")), "unused")
+    with pytest.raises(ValueError, match="finite holding bounds"):
+        SimBaV2Hedger(replace(config, execution=replace(config.execution, holding_lower=None)), "unused")
 
 
 def test_replay_relabels_terminal_rewards_and_roundtrips_rng():
@@ -54,6 +64,9 @@ def test_official_update_full_checkpoint_continuation_and_ledger(tmp_path):
     learner.save(path, runner={"previous": previous})
     clone = SimBaV2Hedger(config, **kwargs)
     saved = torch.load(path, weights_only=False)
+    saved["learner"]["config"]["time_grid"].pop("trade_at_maturity")
+    saved["learner"]["config"]["time_grid"].pop("step_days")
+    saved["learner"]["config"].pop("settlement")
     clone.load_state_dict(saved["learner"])
     for deterministic in (True, False):
         a, tape_a = evaluate(learner, bank, seed=123, deterministic=deterministic, batch_size=4)

@@ -1,6 +1,5 @@
 """Frozen-policy confirmation on one new unchanged-Heston development bank."""
 import argparse
-from dataclasses import asdict
 import json
 from pathlib import Path
 
@@ -9,6 +8,7 @@ import torch
 
 from experiments.qualify_counterfactual import sampled_controller, _load_policy
 from experiments.qualify_policies import load_bank
+from hedging_gym.config import config_from_dict
 from hedging_gym.evaluation import evaluate_controller
 from hedging_gym.finance import numpy_ledger
 from methods.controllers import policy_controller
@@ -76,7 +76,7 @@ def main():
             losses = {}
             for name, path in checkpoints.items():
                 saved = torch.load(path, map_location="cpu", weights_only=False)
-                if saved["config"] != asdict(bank.config):
+                if config_from_dict(saved["config"]) != bank.config:
                     raise ValueError("checkpoint and unchanged finance confirmation configuration differ")
                 if name == strong:
                     policy = POLICIES[name](bank.config, hidden=saved["options"]["hidden"]).to(

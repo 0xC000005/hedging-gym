@@ -35,7 +35,7 @@ def collect(learner, bank, num_envs, *, random_actions, previous=None):
     observed = env.reset().numpy().astype(np.float32)
     if previous is None:
         previous = dict(terminal_loss=np.zeros(num_envs), terminated=np.zeros(num_envs, bool))
-    for _ in range(bank.config.n_steps):
+    for _ in range(bank.config.n_decisions):
         prev = dict(reward=RawLossReplay.rewards(previous["terminal_loss"], previous["terminated"],
                     learner.zeta, bank.config.risk.alpha), terminated=previous["terminated"],
                     truncated=np.zeros(num_envs, bool))
@@ -104,7 +104,7 @@ def main():
     calibration = bank_subset(training, slice(0, min(args.calibration_paths, len(training.spot))))
     if args.development_paths:
         development = bank_subset(development, slice(0, args.development_paths))
-    transitions_per_collection = args.envs * training.config.n_steps
+    transitions_per_collection = args.envs * training.config.n_decisions
     if args.warmup_collections is None:
         args.warmup_collections = math.ceil(5000 / transitions_per_collection)
     if not 0 <= args.warmup_collections < args.collections:

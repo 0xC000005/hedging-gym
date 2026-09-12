@@ -19,7 +19,7 @@ import numpy as np
 import torch
 
 from hedging_gym.finance import observation_fields
-from hedging_gym.config import RiskConfig
+from hedging_gym.config import RiskConfig, config_from_dict
 
 SOURCE_COMMIT = "86899c277cdc697b2b02d827243de1ea93f20a1d"
 NETWORKS = ("_actor", "_critic", "_target_critic", "_temperature")
@@ -124,6 +124,11 @@ class RawLossReplay:
 class SimBaV2Hedger:
     def __init__(self, config, donor_path, *, seed=7, total_updates=1000,
                  replay_capacity=1_000_000, actor_width=128, critic_width=512):
+        if config.risk.objective != "es":
+            raise ValueError("SimBaV2 replay adapter supports terminal ES only")
+        if not all(math.isfinite(value) for name in ("holding_lower", "holding_upper")
+                   for value in config.execution.vector(name, config.n_assets)):
+            raise ValueError("SimBaV2 requires finite holding bounds")
         self.donor_path = load_donor(donor_path)
         from scale_rl.agents.simbaV2.simbaV2_agent import SimbaV2Agent
         from scale_rl.agents.wrappers.normalization import ObservationNormalizer, RewardNormalizer
@@ -208,7 +213,8 @@ class SimBaV2Hedger:
 
     def load_state_dict(self, state):
         from flax import serialization
-        if state["source_commit"] != SOURCE_COMMIT or state["config"] != asdict(self.config) or state["cfg"] != self.cfg:
+        if (state["source_commit"] != SOURCE_COMMIT
+                or config_from_dict(state["config"]) != self.config or state["cfg"] != self.cfg):
             raise ValueError("resume requires identical source, financial contract and learner configuration")
         template = {name: getattr(self.core, name) for name in NETWORKS}
         template["rng"] = self.core._rng

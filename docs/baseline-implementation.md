@@ -1,6 +1,37 @@
 # Baseline implementation and qualification
 
-## Active objective: defensible basic-Heston comparison
+## Current closeout status (2026-09-12)
+
+The maintained method branches are integrated for local review; main merge,
+push and worktree deletion remain held. Implementation and completed training
+are not the same as competitive qualification. No new scientific runs were
+performed for this integration. See [integration scope](integration-review.md)
+and the [source-to-code appendix](baseline-methods.md).
+
+| Family | Verified saved evidence | Remaining boundary |
+|---|---|---|
+| Classical, DH, bands, HPO, PPO | Completed historical basic/fixed-fee development runs, multiple seeds and policy reload checks | No new frozen final comparison; objectives and sampled/greedy deployment remain distinct |
+| QR2023, Hull2021, EX-DRL source transfers | QR seeds 17/29 complete; Hull resumed seeds 7/17/29 complete; EX resumed seed 7 complete in `basic-comparison-2026-09-07-h7WXZD` | Hull trains mean loss plus 1.5 standard deviations; QR conditional CVaR differs from global ES; EX interruption rebuilt missing replay/RNG |
+| CrossQ, TQC, SimBaV2 | All three seeds 7/17/29 completed 99,840 transitions per method in `advanced-rl-2026-09-07-JtfPLE` | Initial-budget policies were weak; critic-only follow-ups do not constitute improved policies or competitive qualification |
+| Native AlphaZero | Completed native evaluation in `native-rl-2026-09-07-VnrGDa/alphazero-native/evaluation/results.json` | Released 60-date trinomial/clipped-squared-loss task, not current Heston/GBM; final raw MSE 0.0040523 versus continuous delta 0.00001653 |
+| Common/source-loop AlphaZero | Retained distinct adapters and scoped qualification artifacts | Search/learning checks do not establish a strong comparator; source-loop ES/MSE/config cases remain separate |
+| Adaptive DH and stronger ordinary pretraining | Saved original/ordinary/meta policies and audited held-out adaptation curves in `r2-adapt-aware-2026-09-08-II2T94` | Ordinary continued training improves the reported final aggregate by 11.34%; this is stronger baseline training, not a novel adaptive algorithm |
+| GEPS, skill retrieval, belief, meta, counterfactual, curriculum, AMAGO | Implemented experimental adapters, negative/mixed results and scoped diagnostics retained | No decisive new-method win; no direction-level qualification implied |
+
+Paths in this table are relative to `/home/max/Documents/hedging-gym-runs/`.
+**Historical basic-Heston evidence uses plain QE, kappa=3, sigma=0.3,
+rho=-0.5, the 30/252 stock/call book and ES95.** It does not qualify today's
+paper presets or QE-M defaults. Historical adaptation runners now load the
+explicit `experiments/configs/legacy-basic-heston.json`; bank/checkpoint metadata
+remain authoritative. Missing old scheme fields decode to QE, including old
+pickled market objects. Genuine task changes are still rejected.
+
+`adaptive_dh` is the existing shared-weight/task-embedding adaptation mechanism.
+Conditional Deep Bellman Hedging is not implemented. The sections below retain
+the historical execution narrative and its then-current checkboxes; they are
+not today's readiness checklist. Original dated external evidence is unchanged.
+
+## Historical plan: defensible basic-Heston comparison (2026-09-07)
 
 Qualify the intended literature baselines on the existing basic Heston task,
 then compare frozen policies on one fresh common test bank. Do not expand the
@@ -22,7 +53,7 @@ compute decisions; they do not select scientific settings from test scores.
 Keep source citations, commands, settings, checkpoints and compact result notes.
 No new registry, testing framework or benchmark infrastructure is needed.
 
-### Approved continuous-control additions
+### Historical plan: approved continuous-control additions
 
 CrossQ, TQC and SimBaV2 join the existing basic-Heston comparison. CrossQ and TQC
 are separate algorithms, not a combined method. Reuse SB3-Contrib for the first
@@ -57,7 +88,7 @@ Use GPU batches for tensor work and CPU parallelism for independent work where
 measured throughput improves. Keep progress and checkpoints. Do not rewrite a
 donor merely to fill the GPU, or interrupt the running native AlphaZero anchor.
 
-## Current work: author-code baseline anchors
+## Historical plan: author-code baseline anchors
 
 Before further common-task tuning, establish the author implementations on
 their original tasks. Our unsuccessful ports do not refute their published
@@ -91,7 +122,7 @@ Adapters use the existing batched market, observations, legal trades and cash
 ledger. The common Heston experiment adapts the source methods; it does not
 reproduce their paper tables. See [methods and sources](../methods/README.md).
 
-## Execution checklist
+## Historical execution checklist
 
 - [x] Implement and exercise the complete classical, DH/band, RL, adaptation, AlphaZero and hybrid/search set.
 - [x] Assign isolated method worktrees and train concurrently where resources allow.

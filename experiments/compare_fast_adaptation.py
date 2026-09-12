@@ -15,7 +15,7 @@ import time
 
 import torch
 
-from hedging_gym.benchmark import benchmark_config
+from hedging_gym.config import config_from_dict
 from hedging_gym.evaluation import evaluate_controller
 from hedging_gym.finance import BANK_FIELDS, generate_market_bank
 from experiments.qualify_adaptation import load_bank
@@ -36,7 +36,9 @@ TARGET_MARKETS = dict(A=SOURCE_MARKETS[0], B=(.09,.09,3,.3,-.5),
 
 
 def market_config(values):
-    base = benchmark_config()
+    # These saved experiments predate the paper defaults and QE-M simulator.
+    base = config_from_dict(json.loads(
+        (Path(__file__).parent / "configs" / "legacy-basic-heston.json").read_text()))
     changes = dict(zip(("v0", "theta", "kappa", "sigma", "rho"), values))
     return replace(base, market=replace(base.market, **changes))
 
@@ -63,7 +65,7 @@ def prepare_banks(args):
         if path.exists():
             saved = torch.load(path, map_location="cpu", weights_only=False)
             if (saved["seed"] != seed or len(saved["spot"]) != count
-                    or saved["config"] != asdict(config)):
+                    or config_from_dict(saved["config"]) != config):
                 raise ValueError("bank does not match this comparison; use a separate output directory")
             continue
         _report("bank_start", completed=number-1, total=len(requests), name=name,

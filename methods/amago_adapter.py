@@ -22,6 +22,12 @@ from hedging_gym.finance import bank_subset, bank_to, observation_fields
 from hedging_gym.gym_env import TensorHedgingEnv
 
 
+def _check_sequence_contract(config):
+    # The retained runner and context schedule count pre-maturity decisions.
+    if config.time_grid.trade_at_maturity:
+        raise ValueError("AMAGO sequences do not support trading at maturity")
+
+
 class ExplicitEpsilonGreedy(EpsilonGreedy):
     """Expose two properties formerly forwarded implicitly by Gymnasium 0.29.
 
@@ -52,6 +58,7 @@ class MemoryHedgingTask(gym.Env):
             raise ValueError("provide training banks and at least one episode")
         self.num_envs = num_envs
         self.config = self.banks[0].config
+        _check_sequence_contract(self.config)
         for bank in self.banks:
             if replace(bank.config, market=self.config.market) != self.config:
                 raise ValueError("training tasks may differ only in observed market parameters")
@@ -128,6 +135,8 @@ class AmagoController:
         self.hidden = None
         self.previous_action = None
         self.context_banks = tuple(context_banks)
+        for bank in self.context_banks:
+            _check_sequence_contract(bank.config)
         self.threshold = risk_threshold
         self.initial_time = initial_time
         if self.context_banks and risk_threshold is None:
@@ -150,6 +159,7 @@ class AmagoController:
         return low + (self.previous_action + 1.) * .5 * (high-low)
 
     def __call__(self, observed, ledger, time_index, config):
+        _check_sequence_contract(config)
         if time_index == 0:
             count = len(observed)
             self.hidden = self.agent.traj_encoder.init_hidden_state(count, observed.device)

@@ -12,7 +12,7 @@ from hedging_gym.benchmark import benchmark_config
 from hedging_gym.config import TimeGrid
 from hedging_gym.finance import generate_market_bank
 from hedging_gym.gym_env import TensorHedgingEnv
-from methods.amago_adapter import ExplicitEpsilonGreedy, MemoryHedgingTask
+from methods.amago_adapter import AmagoController, ExplicitEpsilonGreedy, MemoryHedgingTask
 from amago.envs import AMAGOEnv
 
 
@@ -79,3 +79,16 @@ def test_vectorized_collector_matches_scalar_books_and_autoresets_only_after_set
                 np.repeat(info["AMAGO_LOG_METRIC terminal_loss"], 4), rtol=0., atol=1e-7)
     assert scalar.completed_books == 2
     assert vector.completed_books == 8
+
+
+def test_amago_rejects_maturity_decisions_in_training_context_and_query():
+    config = benchmark_config(model="gbm", time_grid=TimeGrid(n_steps=1, trade_at_maturity=True))
+    bank = generate_market_bank(config, 1, 991)
+    with pytest.raises(ValueError, match="do not support trading at maturity"):
+        MemoryHedgingTask((bank,), threshold=.01)
+    with pytest.raises(ValueError, match="do not support trading at maturity"):
+        AmagoController(None, context_banks=(bank,), risk_threshold=.01)
+    controller = AmagoController(None)
+    env = TensorHedgingEnv(bank)
+    with pytest.raises(ValueError, match="do not support trading at maturity"):
+        controller(env.reset(), env.state, 0, config)

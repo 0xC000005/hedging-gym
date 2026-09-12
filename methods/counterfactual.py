@@ -82,6 +82,8 @@ def _counterfactual_rollout(policy, bank, *, time_index, algorithm="all_mode",
                             live_history=False, retain_scores=False):
     """Shared branching engine; joint updates retain history and sizing graphs."""
     config, batch = bank.config, len(bank.spot)
+    if config.time_grid.trade_at_maturity:
+        raise ValueError("counterfactual updates do not support trading at maturity")
     if algorithm not in ("all_mode", "sampled") or not 0 <= time_index < config.n_steps:
         raise ValueError("choose all_mode/sampled and a decision date before expiry")
     if any(config.execution.vector("minimum_trade", config.n_assets)
@@ -160,6 +162,8 @@ def train_counterfactual(source_policy, train_bank, *, algorithm, zeta, seed=7,
     """
     if algorithm not in ("all_mode", "sampled") or min(updates, batch_size) < 1 or learning_rate <= 0:
         raise ValueError("choose an algorithm and positive training budgets")
+    if train_bank.config.time_grid.trade_at_maturity:
+        raise ValueError("counterfactual updates do not support trading at maturity")
     if checkpoint_path and Path(checkpoint_path).exists():
         raise FileExistsError("use a new checkpoint path; this pilot does not resume")
     bank = bank_to(train_bank, device)

@@ -1,16 +1,17 @@
 """Exact tail gradients, first-order mapping and source-only resumability."""
 
 from copy import deepcopy
-from dataclasses import replace
+from dataclasses import asdict, replace
 
+import pytest
 import torch
 from torch import nn
 
 from hedging_gym.benchmark import benchmark_config
-from hedging_gym.config import TimeGrid
+from hedging_gym.config import RiskConfig, TimeGrid
 from hedging_gym.evaluation import empirical_es
 from hedging_gym.finance import bank_subset, generate_market_bank
-from methods.adaptation import train_multitask
+from methods.adaptation import TaskEmbeddedPolicy, train_multitask
 from methods.meta_pretraining import (_assign_first_order_gradients,
     differentiable_empirical_es, split_source_bank, train_adapt_aware)
 from methods.training import rollout
@@ -201,3 +202,70 @@ def test_ru_continuation_matches_direct_gradient_and_resumes_thresholds(tmp_path
     assert saved["thresholds"].tolist() == full_metadata["source_zetas"]
     assert len(saved["optimizer"]["param_groups"]) == 2
     assert all(float(state["step"]) == 4 for state in saved["optimizer"]["state"].values())
+
+
+def test_legacy_source_contracts_resume_exactly_and_reject_market_changes(tmp_path):
+    config = benchmark_config(time_grid=TimeGrid(n_steps=2))
+    config = replace(config, market=replace(config.market, kappa=3., sigma=.3, rho=-.5, scheme="qe"))
+    other = replace(config, market=replace(config.market, v0=.0625, theta=.0625))
+    banks = tuple(generate_market_bank(c, 8, seed, dtype=torch.float64)
+                  for c, seed in zip((config, other), (151, 152)))
+    torch.manual_seed(31)
+    policy = TaskEmbeddedPolicy(config, n_tasks=2, hidden=(4,), embedding_dim=2).double()
+
+    def legacy(values):
+        values = deepcopy(values)
+        values["market"].pop("scheme")
+        for key in ("step_days", "trade_at_maturity"):
+            values["time_grid"].pop(key)
+        for key in ("initial_cash", "initial_positions"):
+            values["portfolio"].pop(key)
+        for key in ("per_unit", "commission_cap"):
+            values["execution"].pop(key)
+        values["risk"].pop("objective")
+        values.pop("settlement")
+        return values
+
+    metadata = dict(config=asdict(config), source_configs=[asdict(c) for c in (config, other)],
+                    source_paths=[8, 8], zeta=0.)
+    historical = deepcopy(metadata)
+    historical["config"] = legacy(historical["config"])
+    historical["source_configs"] = [legacy(c) for c in historical["source_configs"]]
+    options = dict(seed=41, inner_updates=0, query_size=4, progress=False)
+    full, _ = train_adapt_aware(deepcopy(policy), metadata, banks, episodes=2, **options)
+    checkpoint = tmp_path / "historical-latest.pt"
+    train_adapt_aware(deepcopy(policy), historical, banks, episodes=1,
+                      checkpoint_path=checkpoint, **options)
+    saved = torch.load(checkpoint, weights_only=False)
+    saved["config"] = legacy(saved["config"])
+    saved["source_configs"] = [legacy(c) for c in saved["source_configs"]]
+    torch.save(saved, checkpoint)
+    resumed, _ = train_adapt_aware(deepcopy(policy), historical, banks, episodes=2,
+                                 resume_from=checkpoint, **options)
+    for name, value in full.state_dict().items():
+        if isinstance(value, torch.Tensor):
+            torch.testing.assert_close(value, resumed.state_dict()[name], rtol=0., atol=0.)
+        else:
+            assert value == resumed.state_dict()[name]
+
+    incompatible = deepcopy(historical)
+    incompatible["source_configs"][1]["market"]["scheme"] = "qe_m"
+    with pytest.raises(ValueError, match="declared original source banks"):
+        train_adapt_aware(deepcopy(policy), incompatible, banks, episodes=2, **options)
+    saved["source_configs"][1]["market"]["sigma"] = .4
+    torch.save(saved, checkpoint)
+    with pytest.raises(ValueError, match="saved recipe, seed and source banks"):
+        train_adapt_aware(deepcopy(policy), historical, banks, episodes=2,
+                          resume_from=checkpoint, **options)
+
+
+@pytest.mark.parametrize("inner_updates,outer_loss", ((0, "empirical_es"), (1, "empirical_es"), (0, "ru")))
+def test_meta_pretraining_rejects_mse_before_fitting(inner_updates, outer_loss):
+    config = benchmark_config(model="gbm", time_grid=TimeGrid(n_steps=1),
+                              risk=RiskConfig(objective="mse"))
+    other = replace(config, market=replace(config.market, v0=.04))
+    banks = tuple(generate_market_bank(c, 4, seed) for c, seed in zip((config, other), (71, 72)))
+    policy = TaskEmbeddedPolicy(config, n_tasks=2, hidden=(4,))
+    with pytest.raises(ValueError, match="only the terminal ES objective"):
+        train_adapt_aware(policy, {}, banks, episodes=1, query_size=2,
+                          inner_updates=inner_updates, outer_loss=outer_loss, progress=False)

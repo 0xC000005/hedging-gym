@@ -7,6 +7,7 @@ Only replay reward relabeling and the financial/checkpoint boundary live here.
 These are finance adaptations, not reproductions of the papers' benchmarks.
 """
 from copy import deepcopy
+from dataclasses import replace
 from pathlib import Path
 import random
 
@@ -17,6 +18,7 @@ from stable_baselines3.common.buffers import ReplayBuffer
 
 from hedging_gym.config import RiskConfig
 from hedging_gym.gym_env import TensorHedgingEnv
+from .checkpoints import saved_config
 
 
 ALGORITHMS = {"crossq": CrossQ, "tqc": TQC}
@@ -71,6 +73,8 @@ def build_off_policy(algorithm, env, *, seed=7, device="cpu", buffer_size=1_000_
     transition. Passing the upstream literal default 1 with 512 envs would
     reduce that ratio by 512. CrossQ retains its source policy_delay=3.
     """
+    if env.config.risk.objective != "es":
+        raise ValueError("CrossQ/TQC replay adapter supports terminal ES only")
     return ALGORITHMS[algorithm]("MlpPolicy", env, seed=seed, device=device,
         gamma=1., train_freq=1, gradient_steps=-1, buffer_size=buffer_size,
         learning_starts=learning_starts, batch_size=batch_size,
@@ -120,7 +124,7 @@ def save_off_policy(model, env, directory, *, runner_state=None):
     autoreset next batch, so loading does not silently draw a different bank.
     """
     if (env.tensor_env is None or env.tensor_env.time_index != 0
-            or model.num_timesteps % (env.num_envs * env.config.n_steps)):
+            or model.num_timesteps % (env.num_envs * env.config.n_decisions)):
         raise ValueError("checkpoint requires a completed episode batch")
     if model.replay_buffer.risk_threshold != env.risk_threshold:
         raise ValueError("environment and replay thresholds differ")
@@ -144,12 +148,13 @@ def save_off_policy(model, env, directory, *, runner_state=None):
 def load_off_policy(directory, env, *, device="cpu"):
     directory = Path(directory)
     runtime = torch.load(directory / "runtime.pt", map_location="cpu", weights_only=False)
-    if runtime["config"] != env.config or runtime["num_envs"] != env.num_envs:
+    config = saved_config(runtime["config"])
+    if config != env.config or runtime["num_envs"] != env.num_envs:
         raise ValueError("resume requires the saved configuration and vector batch size")
     model = ALGORITHMS[runtime["algorithm"]].load(directory / "model", env=env,
                                                 device=device, force_reset=False)
     model.load_replay_buffer(directory / "replay.pkl")
-    env.tensor_env = TensorHedgingEnv(runtime["batch"])
+    env.tensor_env = TensorHedgingEnv(replace(runtime["batch"], config=config))
     env.generator.set_state(runtime["bank_rng"])
     env._seeds = runtime["pending_seeds"]
     model.action_space.np_random.bit_generator.state = runtime["action_rng"]
