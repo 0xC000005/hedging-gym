@@ -146,6 +146,7 @@ dependencies = [
 
 [package.dev-dependencies]
 baselines = [
+    { name = "sb3-contrib" },
     { name = "stable-baselines3" },
     { name = "tqdm" },
 ]
@@ -163,6 +164,7 @@ requires-dist = [
 
 [package.metadata.requires-dev]
 baselines = [
+    { name = "sb3-contrib", specifier = "==2.9.0" },
     { name = "stable-baselines3", specifier = "==2.9.0" },
     { name = "tqdm", specifier = "==4.67.1" },
 ]
@@ -488,6 +490,18 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/00/81/37e8df4623b470fbded9241c1d99973863fbc0913cfe9e717f313063dbf7/quantlib-1.43-cp39-abi3-musllinux_1_2_x86_64.whl", hash = "sha256:f9c620de81c8bea76b7bd82a190fdf0393f18812a2c2529351fabc7338b6b3c1", size = 21839501, upload-time = "2026-07-14T08:41:12.093Z" },
     { url = "https://files.pythonhosted.org/packages/4d/46/e7ab24781ad101616705d08dc69900080bf8897962f7fc26d9439c0eac24/quantlib-1.43-cp39-abi3-win32.whl", hash = "sha256:70adba78db6bbb72b5b608af866c2fb3d3e440dc54bee9eb68d757e31c1c2e90", size = 11872353, upload-time = "2026-07-14T08:41:14.815Z" },
     { url = "https://files.pythonhosted.org/packages/72/46/a2aa4a78e26bbb53c5d70ec73745d117519b3df6bc9fd342e2b1738e1724/quantlib-1.43-cp39-abi3-win_amd64.whl", hash = "sha256:61fcb95e8d7e15dfd23e83104d24ce28d45582a645e7dbce0c248216bf51913b", size = 12908304, upload-time = "2026-07-14T08:41:17.36Z" },
+]
+
+[[package]]
+name = "sb3-contrib"
+version = "2.9.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "stable-baselines3" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/8f/8e/476222d88ba09dce0feebf6fb30b55e4dd0c80be5b19dc7b40d12d70752a/sb3_contrib-2.9.0.tar.gz", hash = "sha256:6e839c669552ecb3deb616a42ea98ed5e6c599eb5ac5f86232415b87a3873699", size = 90312, upload-time = "2026-06-15T17:06:08.8Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/c3/06/add3f1d6250f58ca493830ddb2118975aa3c4433bc07662d5ac5089eb691/sb3_contrib-2.9.0-py3-none-any.whl", hash = "sha256:b492b2be792f8f8214ff6b984e94812dc877f809ae82302cbe00626442ae316a", size = 93042, upload-time = "2026-06-15T17:06:07.452Z" },
 ]
 
 [[package]]
