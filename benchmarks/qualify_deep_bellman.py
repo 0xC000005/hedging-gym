@@ -105,9 +105,13 @@ def _excess_gains(bank, tape):
 
 
 def _replay(positions):
-    """Deterministic controller replaying precomputed targets; evaluate it in one batch."""
+    """Deterministic controller replaying precomputed targets; evaluate it in one batch.
+
+    A decision at maturity keeps the preceding holdings: the delta table covers the
+    n_steps pre-maturity decisions and settlement liquidates what is left.
+    """
     def control(observed, ledger, time_index, config):
-        return positions[:, time_index]
+        return positions[:, time_index] if time_index < positions.shape[1] else ledger.positions
     control.action_selection = "deterministic"
     return control
 

@@ -1,6 +1,7 @@
 """Deep Bellman Hedging: utility equations, reward accounting, actor gradients and resume."""
 
 import json
+import math
 from dataclasses import replace
 
 import numpy as np
@@ -63,6 +64,16 @@ def test_utilities_are_normalized_monotone_and_concave(name):
     values = utility(torch.linspace(-4., 4., 801, dtype=torch.float64), lam)
     assert (values.diff() >= -1e-12).all()
     assert (values.diff().diff() <= 1e-9).all()
+
+
+@pytest.mark.parametrize("name", sorted(UTILITIES))
+def test_utilities_stay_normalized_in_float32_at_small_risk_aversion(name):
+    utility, lam = UTILITIES[name], 1.889822365e-6  # default GBM scale times risk aversion 1e-4
+    zero = torch.zeros((), dtype=torch.float32)
+    assert float(utility(zero, lam)) == 0.
+    shifts = torch.tensor([-1., -.1, .1, 1., 10.], dtype=torch.float32)
+    # a riskless zero outcome is worth zero: the integrand u(y) - y never exceeds it
+    assert (oce(utility, zero, shifts, lam) <= 1e-6).all()
 
 
 def test_cvar_and_entropic_shifts_are_the_negative_threshold_losses():
@@ -261,8 +272,11 @@ def test_multistep_rewards_telescope_and_stop_at_settlement(bank):
 
 
 @pytest.mark.parametrize("scenarios,steps", [(1, 1), (2, 1), (1, 3)])
-def test_split_training_matches_uninterrupted(bank, tmp_path, scenarios, steps):
-    options = dict(seed=7, batch_size=8, hidden=(8,), critic_steps=2, scenarios=scenarios, steps=steps, progress=False)
+@pytest.mark.parametrize("device", ["cpu", pytest.param("cuda", marks=pytest.mark.skipif(
+    not torch.cuda.is_available(), reason="CUDA unavailable"))])
+def test_split_training_matches_uninterrupted(bank, tmp_path, scenarios, steps, device):
+    options = dict(seed=7, batch_size=8, hidden=(8,), critic_steps=2, scenarios=scenarios, steps=steps,
+                   progress=False, device=device)
     full, full_meta = train_deep_bellman(bank, updates=4, **options)
     path = tmp_path/"latest.pt"
     train_deep_bellman(bank, updates=2, checkpoint_path=path, checkpoint_every=1, **options)
@@ -278,3 +292,14 @@ def test_split_training_matches_uninterrupted(bank, tmp_path, scenarios, steps):
     assert saved["step"] == 4 and saved["learner"]["critic_optimizer"]["state"]
     with pytest.raises(ValueError, match="precede"):
         train_deep_bellman(bank, updates=1, resume_from=path, **options)
+
+
+@pytest.mark.parametrize("utility", ["cvar", "entropy", "identity"])
+def test_zero_initial_variance_scales_by_the_mean_reversion_level(utility):
+    config = benchmark_config(time_grid=TimeGrid(n_steps=3))
+    config = replace(config, market=replace(config.market, v0=0.))
+    zero_start = generate_market_bank(config, 8, 1102, dtype=torch.float64)
+    _, meta = train_deep_bellman(zero_start, updates=1, batch_size=8, hidden=(8,), utility=utility,
+                                 risk_aversion=10., progress=False)
+    assert meta["reward_scale"] == config.market.spot0*math.sqrt(config.market.theta*config.dt)
+    assert math.isfinite(meta["value_initial"]) and math.isfinite(meta["history"][-1]["actor_objective"])

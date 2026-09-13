@@ -1,6 +1,6 @@
 """Deep Bellman Hedging: actor-critic value iteration under a monetary utility.
 
-Paper: Buehler, Murray and Wood, https://arxiv.org/abs/2207.00932v3.
+Paper: Buehler, Murray and Wood, https://arxiv.org/abs/2207.00932v4 (revision 2.03).
 Implementation: equation-based PyTorch implementation; the paper has no public
 code. The utility list follows the paper and the author's vanilla Deep Hedging
 objectives (SOURCE below, GPL-3.0, equations only). Notes: docs/baseline-methods.md.
@@ -13,18 +13,20 @@ random holdings from the simulated bank instead of tabulated history, so one
 trained model covers arbitrary initial books (paper section 3.1).
 
 Source differences: the reward enters the utility as in Definition 1 rather than
-outside it as displayed in the actor/critic objectives (11)-(13); the critic
+outside it as displayed in the actor/critic objectives (8)-(13); the critic
 minimizes the unconditional squared loss the paper shows has the same gradient;
 cash is not a network input because monetary utilities are cash-invariant; and a
 configured terminal closeout fee is charged inside the final reward. Learner
-quantities are expressed in units of the one-day stock move spot0*sqrt(v0*dt),
-which equals scaling the risk aversion, so that optimizer steps match the value
-scale; risk aversion and reported values stay in money units. Beyond the
-published one-step scheme, `steps` selects the paper's n-step operator T_n (whose
-fixed point differs from the one-step one unless the utility is time-consistent,
-as the paper's remark on multiple time steps notes), `scenarios` averages targets
-over fresh conditional continuations, and `aggregate="entropic"` uses the
-closed-form entropic certainty equivalent.
+quantities are expressed in units of the one-day stock move spot0*sqrt(v*dt), v
+being the initial variance or, for a Heston bank started at zero variance, its
+mean-reversion level; this equals scaling the risk aversion, so that optimizer
+steps match the value scale, while risk aversion and reported values stay in
+money units. Beyond the published one-step scheme, `steps` selects the paper's
+n-step operator T_n (whose fixed point differs from the one-step one unless the
+utility is time-consistent and undiscounted, as the paper's Remark 2 notes),
+`scenarios` averages targets over fresh conditional continuations, and
+`aggregate="entropic"` uses the closed-form entropic certainty equivalent of the
+scenarios, a logarithm of a finite sample mean that stays biased at fixed K.
 """
 import math
 import time
@@ -77,8 +79,9 @@ UTILITIES = {
     "entropy": _entropy,
     "cvar": lambda x, lam: (1+lam)*x.clamp_max(0),
     "truncated_entropy": lambda x, lam: torch.where(x > 0, _entropy(x.clamp_min(0), lam), x-.5*lam*x.square()),
-    "vicky": lambda x, lam: (1+lam*x-(1+(lam*x).square()).sqrt())/lam,
-    "quadratic": lambda x, lam: torch.where(x < 1/lam, .5/lam-.5*lam*(x-1/lam).square(), .5/lam),
+    # Forms without cancellation at small lam: u(0) is exactly zero in float32.
+    "vicky": lambda x, lam: x-lam*x.square()/((1+(lam*x).square()).sqrt()+1),
+    "quadratic": lambda x, lam: torch.where(x < 1/lam, x-.5*lam*x.square(), .5/lam),
 }
 
 
@@ -90,6 +93,11 @@ def oce(utility, outcome, shift, lam):
 def entropic_certainty(outcome, lam):
     """Closed-form entropic certainty equivalent over the scenario axis (paper section 2.1)."""
     return -(torch.logsumexp(-lam*outcome, 1)-math.log(outcome.shape[1]))/lam
+
+
+def _variance_level(market):
+    """Initial variance, or the mean-reversion level when a Heston bank starts at zero variance."""
+    return market.v0 or market.theta
 
 
 def position_bounds(config, position_range):
@@ -271,7 +279,7 @@ class DeepBellmanLearner:
         fields, names = self.policy.observation_fields, self.policy.instrument_names
         self.shift = _head(fields, names, scale, 1, hidden).to(device=device, dtype=dtype)
         self.critic = BuehlerZero(_head(fields, names, scale, 1, hidden)).to(device=device, dtype=dtype)
-        self.reward_scale = config.market.spot0*math.sqrt(config.market.v0*config.dt)
+        self.reward_scale = config.market.spot0*math.sqrt(_variance_level(config.market)*config.dt)
         self.utility = UTILITIES[utility]
         # CVaR is coherent, so its aversion is unit-free; the others rescale with money.
         self.lam = risk_aversion if utility == "cvar" else risk_aversion*self.reward_scale
@@ -419,7 +427,7 @@ def train_deep_bellman(bank, *, seed=7, updates=8, batch_size=32, hidden=(32, 32
         learner.load_state_dict(saved["learner"])
         generator.set_state(saved["sampling_rng"])
         if scenario_generator is not None:
-            scenario_generator.set_state(saved["scenario_rng"].to(device))
+            scenario_generator.set_state(saved["scenario_rng"])
         restore_rng(saved["rng"])
         first_step, history, previous_seconds = saved["step"], saved["history"], saved["elapsed_seconds"]
     probe = bank_subset(train_device, slice(0, min(1024, len(train_device.spot))))

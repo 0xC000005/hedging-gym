@@ -107,23 +107,29 @@ terminal objectives coincide (the paper's Theorem 2 at zero rates). Report
 `dbh` with the CVaR utility on an ES task as a different objective, and use
 `objective="entropy"` for a like-for-like comparison with pathwise Deep Hedging.
 
-The paper's one-step estimator is weak for hedging: a one-day target carries one
-day of variance against one daily move of noise, so the policy's inter-temporal
-cost-versus-risk trade-off must come from the critic's derivative in holdings,
-which semi-gradient regression on noisy targets does not resolve. Three options
-of `train_deep_bellman` change the estimator, not the objective: `steps=n` uses
-the paper's n-step operator T_n (rewards of n decisions by the current policy
+In this implementation and at the budgets tested, the one-step estimator is
+weak for hedging: a one-day target carries one day of variance against one
+daily move of noise, so the policy's inter-temporal cost-versus-risk trade-off
+must come from the critic's derivative in holdings, which the semi-gradient
+regression on noisy targets did not resolve here. Three options of
+`train_deep_bellman` change the estimator, not the objective: `steps=n` uses
+the paper's n-step operator $T_n$ (rewards of n decisions by the current policy
 with pathwise gradients, then the continuation value; the horizon gives the
 pathwise Deep Hedging objective per sampled state), `scenarios=K` averages the
 one-step target over K fresh conditional continuations instead of the bank's
 next day, and `aggregate="entropic"` replaces the learned OCE shift by the
-closed-form entropic certainty equivalent of those scenarios. Declare the
-values used; `steps=1, scenarios=1` is the published scheme. The paper's own
-remark on multiple time steps notes that the fixed point of $T_n$ differs from
-that of $T$ unless the utility is time-consistent: with the entropic utility or
-the mean the two coincide and `steps=n` changes only the estimator; with the
-CVaR utility `steps>1` optimizes a different nested objective and must be
-reported as such. The authors' numerical companion (Murray et al., ICAIF 2022)
+closed-form entropic certainty equivalent of those scenarios. That last form is
+a logarithm of a finite-K sample mean, so its expectation is not the entropic
+operator even with unlimited fresh batches: the finite-K bias persists and can
+move the maximizing action, which distinguishes it from merely lowering target
+noise; the default OCE integrand has no such bias. Declare the values used;
+`steps=1, scenarios=1` is the published scheme. The paper's Remark 2 notes that
+the fixed point of $T_n$ differs from that of $T$ unless the utility is
+time-consistent: at the zero rates enforced here ($\beta = 1$) the entropic
+utility and the mean make the two coincide, so `steps=n` changes only the
+estimator (with discounting they differ even then, because a discount factor
+inside the utility rescales the risk aversion); with the CVaR utility `steps>1`
+optimizes a different nested objective and must be reported as such. The authors' numerical companion (Murray et al., ICAIF 2022)
 does not run the bare scheme either: it adds a Polyak-averaged target critic,
 an actor skip connection over the Black-Scholes delta, a critic residual over
 the book value, on-policy state collection and exponential-form losses. None
