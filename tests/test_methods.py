@@ -93,6 +93,22 @@ def test_training_changes_policy_and_frozen_evaluation_is_finite(bank, method, p
     assert np.isfinite(metrics["ru_at_training_zeta"])
 
 
+def test_entropic_objective_trains_and_reports_pooled_entropic_risk():
+    config = benchmark_config(model="gbm", time_grid=TimeGrid(n_steps=3),
+                              risk=RiskConfig(objective="entropy", risk_aversion=.1))
+    bank = generate_market_bank(config, 24, 1101, dtype=torch.float64)
+    policy, metadata = train_dh(bank, seed=7, updates=3, batch_size=16, hidden=(8,), progress=False)
+    assert metadata["history"][-1]["completed"] == 3
+    heldout = generate_market_bank(config, 12, 2201, dtype=torch.float64)
+    metrics, tape = evaluate_controller(policy_controller(policy), heldout, zeta=metadata["zeta"])
+    assert metrics["objective"] == "entropy"
+    entropic = float(config.risk.entropic_risk(tape["terminal_loss"].double()))
+    assert metrics["objective_value"] == pytest.approx(entropic, abs=1e-12)
+    assert float(config.risk.loss(tape["terminal_loss"].double(), metadata["zeta"]).mean()) >= entropic
+    assert metrics["ru_at_training_zeta"] == pytest.approx(
+        float(config.risk.loss(tape["terminal_loss"].double(), metadata["zeta"]).mean()), abs=1e-12)
+
+
 @pytest.mark.parametrize("method", ["delta", "delta_gamma", "delta_variance"])
 def test_classical_controller_uses_common_evaluation_accounting(bank, method):
     metrics, tape = evaluate_controller({'delta': delta_controller, 'delta_gamma': delta_gamma_controller, 'delta_variance': delta_variance_controller}[method](), bank, batch_size=7)

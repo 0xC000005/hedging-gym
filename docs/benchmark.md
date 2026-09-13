@@ -82,6 +82,13 @@ the environment does not estimate a tail from one path. MSE and ES are
 alternative objectives. Comparisons must train every method for the chosen
 objective; existing ES checkpoints do not become MSE-trained checkpoints.
 
+`RiskConfig(objective="entropy", risk_aversion=λ)` selects the entropic risk
+`log(mean(exp(λL)))/λ`, reported by the evaluator as `objective_value` and
+trained through the threshold form described in
+[baseline mechanisms](baseline-methods.md#training-objectives-are-not-interchangeable).
+Gym behaves as for ES: terminal P&L until a `risk_threshold` is supplied, then
+the negative threshold-form loss. Learners that only accept ES reject it.
+
 The [source AlphaZero experiment](source-alphazero.md) includes stock-only GBM
 and Heston JSON configurations with MSE and a 365-day clock. These choose the
 market, book, calendar and objective independently.
