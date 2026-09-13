@@ -1,85 +1,76 @@
-# GEPS conditioning on the common hedger
+# GEPS conditioning for Deep Hedging
 
-This is a finance adaptation of the GEPS layer mechanism, not a reproduction of
-its PDE experiments or evidence of improved financial performance.
+[GEPSPolicy](../src/hedging_gym/baselines/geps.py) uses one task context to
+modulate every layer of a shared hedger. Source training learns the shared
+weights and source contexts; target adaptation freezes those quantities and
+fits a new context. It uses the same observations, target holdings, cash ledger
+and terminal-risk calculation as Adaptive Deep Hedging.
 
-## Pinned authority
+## Sources and implementation
 
-- Kassaï Koupaï et al., NeurIPS 2024, equations (4)--(5) and section 4.2:
-  <https://arxiv.org/abs/2410.23889>.
-- Author implementation: <https://github.com/itsakk/geps> at commit
-  `e9a865218ecffacb7007ac7d719f3741afcf8c02`.
-- Exact reference: `geps/model/layers.py`, `GEPSLinear`, lines 156--197;
-  shared context across layers: `geps/model/networks.py`, `MLP`, lines 7--32.
-- The donor checkout stays outside this repository. Set `GEPS_DONOR_ROOT` to
-  that checkout when running source-parity tests.
-- Checkout retained outside Git at
-  `/home/max/Documents/hedging-gym-runs/r2-fast-adaptation-2026-09-08-DChV47/donors/geps`.
-  No donor package is installed. The pinned repository has no tracked license
-  file; this adapter independently expresses the published equations and does
-  not vendor the author's source.
+The layer follows equations (4)–(5) of
+[GEPS, NeurIPS 2024](https://arxiv.org/abs/2410.23889) and the
+[author implementation](https://github.com/itsakk/geps/tree/e9a865218ecffacb7007ac7d719f3741afcf8c02),
+pinned at `e9a865218ecffacb7007ac7d719f3741afcf8c02`. The relevant definitions
+are `GEPSLinear` in `geps/model/layers.py` and `MLP` in
+`geps/model/networks.py`.
 
-## Mechanism and integration
+For row-vector inputs, the layer computes:
 
-For row-vector inputs, each layer computes
+```text
+x @ W + ((x @ A) * c) @ B + b + c @ bias_context
+```
 
-`x @ W + ((x @ A) * c) @ B + b + c @ bias_context`.
+This includes the context-dependent bias and is equivalent to forming
+`W + A @ diag(c) @ B` explicitly. The same context is used in the output layer;
+the adaptation factor is fixed at one.
 
-This is exactly `x @ (W + A @ diag(c) @ B) + b + c @ bias_context`, including
-the context-dependent bias from equation (5). One context `c` is used in every
-layer, including the output. The reassociation avoids per-path dense adapted
-weight matrices. The fixed adaptation factor is one.
+The adapter independently expresses the published equations and does not
+vendor the author's source. The pinned upstream repository has no tracked
+license file. A separate source checkout is needed only for the optional
+author-layer comparison.
 
-`GEPSPolicy` subclasses `TaskEmbeddedPolicy` and accepts the same constructor
-arguments. Its `shared` module splits the inherited concatenated input into
-financial features and context: the context modulates weights, rather than
-being an additional financial input. All observed market parameters remain in
-the financial features. Existing action bounds and cash accounting are unchanged.
+## Supported use and deviations
 
-Use the common multitask trainer's policy-class hook to construct `GEPSPolicy`.
-The existing optimizer groups fit `shared` and `source_embeddings` jointly with
-one ES threshold per source task. This is first-order joint training; it is
-**not** CAVIA-style differentiation through an inner adaptation loop. After
-pretraining, inherited `prepare_adaptation()` freezes every shared parameter
-and source context, sets the new context to the source mean, and adapts only
-that context plus the common ES threshold through `AdaptationUpdater`.
+Use `GEPSPolicy` through `train_multitask(..., policy_class=GEPSPolicy)` in
+`hedging_gym.baselines.adaptive_deep_hedging`. It inherits finite holding bounds
+and the continuous-action restriction: minimum-order sizes and trade lots are
+unsupported. Source tasks must share the book, calendar, execution rules and
+risk configuration; only market parameters may differ.
 
-The adaptation context has the same default four scalars as Adaptive DH. GEPS
-adds shared low-rank parameters, so total model size is not parameter-matched;
-record it and charge actual training/adaptation time. A faster or better result
-must be measured, not inferred from low rank.
+The supplied comparison uses terminal ES and a four-dimensional context.
+Joint source training has no inner meta-gradient loop. Target adaptation fits
+the context and ES threshold with the shared network frozen.
 
-## Deliberate changes from the native PDE setup
+Compared with the PDE source, this implementation uses bounded hedge holdings,
+terminal financial risk, and the common two-hidden-layer tanh policy. Source
+contexts start at zero. Layer initialization follows `GEPSLinear.reset_parameters`
+rather than dataset-specific overrides, but does not reproduce the author's
+random-number consumption. Low-rank layers add shared parameters, so this is
+not a parameter-matched comparison with Adaptive DH.
 
-- The output is bounded hedge holdings, and the training loss is the common
-  cost-inclusive terminal ES objective, not PDE trajectory error.
-- Common two-hidden-layer tanh architecture is retained instead of the author's
-  four-layer contextual-Swish MLP and PDE integration stack.
-- Source contexts start at zero as in the author's `Derivative`, rather than
-  the comparator's `0.1 * randn`. Layer initialization uses the distributions
-  in `GEPSLinear.reset_parameters`, not dataset-specific `init_weights` overrides.
-  Its row-vector weight orientation is retained, including its initialization
-  fan convention. Exact source random-number consumption is not reproduced.
-- Source task schedules, path banks, optimizer settings, mean-context restart,
-  ES-threshold fitting and evaluation separation belong to the common harness.
-  This lane does not supply a separate training or evaluation protocol.
+## Run
 
-## Qualification
+From an installed checkout, replace the output placeholder with a directory
+outside the repository:
 
-`tests/test_geps.py` checks the explicit equation and all parameter/input/context
-gradients in float64, then compares the adapter to the actual pinned author
-layer. It also checks joint source differentiation, one context across all
-layers, the inherited context-only freeze/update contract, and a tiny common
-ledger rollout. The author test needs `GEPS_DONOR_ROOT`; without it only that
-source-dependent test is skipped.
+```bash
+uv run --frozen python -m benchmarks.compare_fast_adaptation banks \
+  --output /path/to/fast-adaptation --device cpu
+uv run --frozen python -m benchmarks.compare_fast_adaptation compare \
+  --output /path/to/fast-adaptation --method geps --seed 7 --device cpu
+```
 
-These checks qualify equations and integration, not native PDE performance or
-financial superiority. Financial performance is measured separately by
-`benchmarks.compare_fast_adaptation`; no full training belongs to this implementation gate.
+The full recipe performs substantial pretraining. Add `--smoke` to both stages,
+using a separate directory, for a small execution check. See
+[fast adaptation](fast-adaptation.md) for controls, additional seeds and summaries.
 
-On 2026-09-08, the source-dependent tests and existing adaptation tests passed:
-`8 passed`, using the existing hedging-gym virtualenv, CPU, two OpenMP/MKL
-threads, the worktree's `src` and root on `PYTHONPATH`, and the checkout above
-as `GEPS_DONOR_ROOT`. Command: `python -m pytest -q tests/test_geps.py
-tests/test_adaptation_methods.py`. The ledger test uses only two tiny updates;
-no scientific training or GPU job was run for this gate.
+Focused equation, gradient and adaptation checks:
+
+```bash
+uv run --frozen pytest -q tests/test_geps.py tests/test_adaptation_methods.py
+GEPS_DONOR_ROOT=/path/to/pinned-geps uv run --frozen pytest -q tests/test_geps.py
+```
+
+Without `GEPS_DONOR_ROOT`, the author-layer comparison is skipped. These checks
+establish implementation behavior, not PDE reproduction or improved hedging risk.

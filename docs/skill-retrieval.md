@@ -1,102 +1,101 @@
-# Learned skill retrieval for hedging adaptation
+# Learned context retrieval for hedging
 
-When a market changes, which previously learned hedging context is the best
-starting point? This adapter learns that choice, then leaves adaptation to the
-existing direct-gradient expected-shortfall trainer. It does not change the
-market simulator, financial book, transaction costs or accounting.
+The [retrieval extension](../src/hedging_gym/extensions/skill_retrieval.py)
+ranks a frozen library of source task vectors for a new market, then passes the
+selected vector to the existing embedding-adaptation trainer. It changes the
+initialization, not the financial environment or update objective.
 
-## Source and finance mapping
+## Source and mapping
 
-[SRSA (Guo et al., ICLR 2025)](https://arxiv.org/abs/2503.04538) evaluates each
-source policy on each prior task and learns to predict zero-shot transfer
-success. It retrieves a promising source policy and fine-tunes it. The
-[official code](https://github.com/NVlabs/SRSA) is pinned at
-`2bed3f7ecee73be29eaeccd1b3a6fe03d4482702`.
+[SRSA, ICLR 2025](https://arxiv.org/abs/2503.04538) retrieves specialist policies
+using predicted transfer success. The
+[official implementation](https://github.com/NVlabs/SRSA/tree/2bed3f7ecee73be29eaeccd1b3a6fe03d4482702)
+is pinned at `2bed3f7ecee73be29eaeccd1b3a6fe03d4482702`.
+Relevant files are `source/SRSA/SRSA/embedding/{dataset,model,train}.py`:
+`PairData` constructs ordered task pairs, `SuccPreNetwork.fc` supplies the
+one-hidden-layer ReLU/MSE predictor, and `retrieve` ranks skills.
+Xavier weights and 0.01 biases are retained.
 
-The relevant source files are
-`source/SRSA/SRSA/embedding/{dataset,model,train}.py`: `PairData` forms ordered
-source–target pairs, `SuccPreNetwork.fc` is a one-hidden-layer ReLU scalar
-predictor trained with squared error, and `retrieve` ranks source skills.
-The head's Xavier initialization and 0.01 biases are retained. We implement
-this small head directly; loading its enclosing network would also require
-unneeded point-cloud and robot-transition encoders.
+| SRSA component | Finance adaptation |
+|---|---|
+| Separate specialist policies | Shared hedger with frozen source contexts |
+| Geometry, dynamics and expert-action features | Observed market parameters |
+| Higher zero-shot success | Lower cost-inclusive terminal ES |
+| 128-unit predictor | Configurable head, default width 32 |
+| PPO and self-imitation | Existing embedding-only gradient updates |
 
-| SRSA | This finance adapter |
-| --- | --- |
-| Separate specialist policies | Fixed shared hedger plus source task vectors |
-| Geometry, dynamics and expert-action features | Supplied stochastic-market parameters |
-| Higher zero-shot success | Lower cost-inclusive terminal ES95 |
-| 128-unit predictor over 90 skills | 32-unit predictor over the initial 8 contexts |
-| PPO and self-imitation after retrieval | Existing embedding-only ES gradient updates |
+The robot encoders, full-policy library, self-imitation and expanding library
+are not implemented. This is a transfer of the retrieval mechanism, not a
+complete SRSA reproduction.
 
-This is **SRSA-style learned retrieval**, not a native reproduction or complete
-SRSA implementation. The donor's learned representation, full-policy library,
-self-imitation and expanding library are not implemented. In particular, the
-original hypothesis that good zero-shot transfer predicts fast fine-tuning
-remains an empirical question for this context-restricted finance adaptation.
+## Labels and supported inputs
 
-## Labels and selection
+For source context i on source market j, fit the target
 
-Let `R[i,j]` be the pooled ES95 of source context `i` on fresh calibration paths
-from source market `j`. Let `R[mean,j]` be the result with the mean source
-context. The predictor learns
-
-```
-y[i,j] = R[i,j] - R[mean,j]
+```text
+label[i, j] = ES(context_i, market_j) - ES(mean_context, market_j)
 ```
 
-Centering on the mean context removes a target-market difficulty offset without
-changing source rankings. A single source-calibrated root-mean-square label
-scale conditions the MSE optimization. Input means and standard deviations
-also come only from source markets; constant source coordinates use unit scale.
-All ordered source–target pairs are used, with asymmetric concatenated inputs.
+Centering removes a market-specific offset without changing rankings. Feature
+normalization and label scaling use source markets only. All ordered pairs are
+used; source and target order matters.
 
-Calibration banks must have fresh, recorded seeds and be separate from source
-policy training, future adaptation training and evaluation banks. Chunking is
-only for memory: losses are pooled before ES, not averaged after computing ES
-on individual chunks. The source policy is copied for scoring and remains
-unchanged. No future target paths enter predictor fitting or ranking.
+Provide at least two ordered source contexts and matching fresh calibration
+banks. Banks must share book, calendar, execution and risk settings. Both
+market model and discretization scheme must agree across the source library
+and target; categorical model/scheme identifiers are excluded from numerical
+features. The supplied comparison uses ES95.
+
+Scoring pools losses before computing ES and preserves the source policy.
+Predictor fitting and top-one ranking do not use target evaluation paths.
+Top-five or exhaustive rescoring requires a separate target-calibration bank
+and additional reported work.
+
+## API
+
+Given a pretrained `source_policy`, separate `source_calibration_banks` and
+`target_training_bank`, the public adaptation factory accepts the retrieved
+initialization explicitly:
 
 ```python
-retriever, metadata = train_retriever(
-    source_policy, source_calibration_banks,
-    seed=7, updates=300, checkpoint_path=artifact_dir / "retriever.pt",
+from copy import deepcopy
+from hedging_gym.baselines.adaptive_deep_hedging import make_updater
+from hedging_gym.extensions.skill_retrieval import rank_contexts, train_retriever
+
+retriever, retrieval_work = train_retriever(
+    source_policy, source_calibration_banks, seed=7, updates=300,
 )
-ranking = rank_contexts(retriever, source_policy, target_config)
-context = source_policy.source_embeddings[ranking[0]].detach().clone()
+ranking = rank_contexts(retriever, source_policy, target_training_bank.config)
+initial = source_policy.source_embeddings[ranking[0]].detach().clone()
+target_policy = deepcopy(source_policy)
+updater = make_updater(target_policy, seed=7, updates=50)
+updater(target_training_bank, initial_embedding=initial)
 ```
 
-The runner must install this initialization at the new-market adaptation reset;
-otherwise `AdaptationUpdater`'s default mean reset erases it. Learning rates,
-threshold initialization, number of updates and optimizer reset rules must be
-the same for mean, nearest and learned retrieval.
+Passing `initial_embedding` at the first new-market update prevents the default
+mean-context reset from erasing the selection. Use identical update budgets,
+learning rates and reset rules for mean, nearest and learned retrieval controls.
+The underlying continuous adaptation requires finite bounds and rejects
+minimum-order sizes and trade lots.
 
-The source paper also evaluates a top-five shortlist on the new task before
-choosing one skill. `rank_contexts` supports this source-backed variant: the
-runner rescores its first five contexts on a dedicated target-calibration bank,
-not an evaluation bank. It must charge that work and disclose the difference
-from fast prediction-only top-one selection. With only eight source contexts,
-exhaustively rescoring all eight is a useful cheap control, not an oracle for
-future realized paths.
+## Run and verify
 
-## What the comparison must report
+The Adaptive-DH arm of the common comparison also runs nearest, top-one,
+top-five and exhaustive retrieval:
 
-- Mean-source initialization, nearest standardized market and learned retrieval,
-  before and after identical embedding-update budgets.
-- Source pretraining, calibration generation, all `(n+1) × n` label evaluations,
-  predictor fitting, any top-k rescoring and target adaptation costs separately.
-- Held-out target ES and context selection; label fit is not evidence of
-  adaptation gain. Good source fit but poor new-market ranking indicates a
-  retrieval generalization problem, not a failure of AdaptiveDH or SRSA.
+```bash
+uv run --frozen python -m benchmarks.compare_fast_adaptation banks \
+  --output /path/to/fast-adaptation --device cpu
+uv run --frozen python -m benchmarks.compare_fast_adaptation compare \
+  --output /path/to/fast-adaptation --method adh --seed 7 --device cpu
+uv run --frozen pytest -q tests/test_skill_retrieval.py
+```
 
-The adapter returns raw source transfer scores, centered labels, fitted scores,
-timings, episode counts and ledger-decision counts. Checkpoints preserve the
-predictor, normalization, optimizer, RNG and labels outside Git. Market bank
-generation and shared pretraining belong to the common runner's cost ledger.
+Use an external output directory; add `--smoke` to both comparison stages in a
+separate directory for a small execution check. See
+[fast adaptation](fast-adaptation.md) for multiple seeds and summaries.
 
-## Focused verification
-
-`tests/test_skill_retrieval.py` checks pooled label calculations against complete
-rollouts, preservation of the source policy, the ReLU/MSE head and gradients,
-selection direction, nearest-market control, and checkpointed predictions.
-These are implementation checks, not a finance performance claim.
+Report source pretraining, calibration generation, all label rollouts,
+predictor fitting, rescoring and adaptation costs. Outputs retain scores,
+labels, normalizations, timing and checkpoint state. Good source-label fit
+alone does not establish useful ranking on unseen markets or faster adaptation.

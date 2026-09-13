@@ -4,7 +4,7 @@
 
 Use a Linux terminal, including a Linux distribution under WSL. Install
 [uv using its official instructions](https://docs.astral.sh/uv/getting-started/installation/),
-then clone this private repository using an account with access:
+then clone the repository:
 
 ```bash
 git clone https://github.com/0xC000005/hedging-gym.git

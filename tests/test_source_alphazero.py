@@ -1,5 +1,7 @@
 """The source loop sees only causal states and the common financial ledger."""
 import json
+import os
+from copy import deepcopy
 from dataclasses import asdict, replace
 from pathlib import Path
 
@@ -8,7 +10,7 @@ import pytest
 import torch
 
 from hedging_gym import TimeGrid, benchmark_config, config_from_dict
-from hedging_gym.baselines.source_alphazero import SourceHedgingGame
+from hedging_gym.baselines.source_alphazero import SourceHedgingGame, load_source
 from hedging_gym.environment import finance
 
 
@@ -90,3 +92,76 @@ def test_stock_only_source_configuration_runs_complete_shared_ledger(market):
                                     root.ledger.cash.numpy(), np.array([payoff]), config)
     assert state.loss == pytest.approx(reference["terminal_loss"][0], abs=2e-14)
     assert state.date*config.dt == config.time_grid.horizon
+
+
+@pytest.fixture(scope="module")
+def native_network_adapter():
+    donor_root = os.environ.get("ALPHAZERO_DONOR_ROOT")
+    if not donor_root:
+        pytest.skip("set ALPHAZERO_DONOR_ROOT to the pinned external donor checkout")
+    _, wrapper = load_source(donor_root)
+    game = SourceHedgingGame(benchmark_config(), seed=1, zeta=0., scale=.1)
+    args = dict(num_channels=8, dropout=.25)
+    return game, args, wrapper
+
+
+@pytest.mark.parametrize("training", [False, True])
+def test_source_network_preserves_native_forward_and_raw_value(native_network_adapter, training):
+    game, args, wrapper = native_network_adapter
+    with torch.random.fork_rng(devices=[]):
+        torch.manual_seed(19)
+        adapted = wrapper(game, args).nnet
+        with torch.no_grad():
+            adapted.fc4.bias.fill_(4.)
+        native = type(adapted).__bases__[0](game, args)
+        native.lin1 = deepcopy(adapted.lin1)
+        native.load_state_dict(adapted.state_dict())
+        adapted.train(training)
+        native.train(training)
+        observed = torch.randn(4, game.feature_dim, requires_grad=True)
+        reference_observed = observed.detach().clone().requires_grad_()
+        value_inputs = []
+        handle = native.fc4.register_forward_pre_hook(
+            lambda module, inputs: value_inputs.append(inputs[0]))
+        try:
+            torch.manual_seed(23)
+            reference_policy, bounded_value = native(reference_observed)
+        finally:
+            handle.remove()
+        reference_rng = torch.get_rng_state()
+        # Compute only the final linear head independently of the adapter hook.
+        reference_value = torch.nn.functional.linear(value_inputs[0], native.fc4.weight, native.fc4.bias)
+        torch.manual_seed(23)
+        policy, value = adapted(observed)
+        assert torch.equal(torch.get_rng_state(), reference_rng)
+        assert (value.abs() > 1).any()
+        assert not adapted.fc4._forward_hooks
+        torch.testing.assert_close(policy, reference_policy, rtol=0, atol=0)
+        torch.testing.assert_close(value, reference_value, rtol=0, atol=0)
+        torch.testing.assert_close(value.tanh(), bounded_value, rtol=0, atol=0)
+        (policy.square().mean() + value.square().mean()).backward()
+        (reference_policy.square().mean() + reference_value.square().mean()).backward()
+        torch.testing.assert_close(observed.grad, reference_observed.grad, rtol=0, atol=0)
+        for name, parameter in adapted.named_parameters():
+            torch.testing.assert_close(parameter.grad, native.get_parameter(name).grad, rtol=0, atol=0)
+        # Includes batch-normalization running statistics and update counters.
+        for name, value in adapted.state_dict().items():
+            torch.testing.assert_close(value, native.state_dict()[name], rtol=0, atol=0)
+
+
+def test_source_network_removes_capture_hook_on_failure(native_network_adapter):
+    game, args, wrapper = native_network_adapter
+    network = wrapper(game, args).nnet.eval()
+
+    def fail(module, inputs, output):
+        raise RuntimeError("injected donor value-head failure")
+
+    failure_handle = network.fc4.register_forward_hook(fail)
+    try:
+        with pytest.raises(RuntimeError, match="injected donor value-head failure"):
+            network(torch.zeros(2, game.feature_dim))
+        assert list(network.fc4._forward_hooks) == [failure_handle.id]
+    finally:
+        failure_handle.remove()
+    network(torch.zeros(2, game.feature_dim))
+    assert not network.fc4._forward_hooks

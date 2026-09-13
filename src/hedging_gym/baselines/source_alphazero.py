@@ -19,7 +19,6 @@ from pathlib import Path
 import numpy as np
 import torch
 from torch import nn
-from torch.nn import functional as F
 
 from hedging_gym.environment import finance
 from hedging_gym.environment.pricing import quantlib_mark_state
@@ -169,15 +168,17 @@ def load_source(donor_path):
             self.lin1 = nn.Linear(game.feature_dim, args["num_channels"])
 
         def forward(self, s):
-            # Same six hidden layers, batch normalization, dropout and heads.
-            # Only input width and the terminal value activation differ.
-            s = F.relu(self.bn1(self.lin1(s)))
-            s = F.relu(self.bn2(self.lin2(s)))
-            s = F.relu(self.bn3(self.lin3(s)))
-            s = F.relu(self.bn4(self.lin4(s)))
-            s = F.dropout(F.relu(self.fc_bn1(self.fc1(s))), p=self.args["dropout"], training=self.training)
-            s = F.dropout(F.relu(self.fc_bn2(self.fc2(s))), p=self.args["dropout"], training=self.training)
-            return F.log_softmax(self.fc3(s), dim=1), self.fc4(s)
+            # Run the donor's network unchanged, but keep its pre-tanh value:
+            # financial losses are not bounded like the source game reward.
+            raw_value = []
+            handle = self.fc4.register_forward_hook(
+                lambda module, inputs, output: raw_value.append(output)
+            )
+            try:
+                policy, _ = super().forward(s)
+            finally:
+                handle.remove()
+            return policy, raw_value[0]
 
     class CommonWrapper(source_wrapper):
         def __init__(self, game, args):

@@ -1,6 +1,7 @@
 # Hedging Gym
 
 ![Research alpha](https://img.shields.io/badge/status-research_alpha-orange)
+[![Original code: MIT](https://img.shields.io/badge/original_code-MIT-blue)](LICENSE)
 
 A research library for option hedging, with a configurable financial environment,
 classical and learned baselines, and paper benchmark configurations. All baselines
@@ -13,15 +14,14 @@ terminal-loss evaluation.
 | Baselines | Delta hedges, Deep Hedging, PPO, AlphaZero, adaptation and other named methods | [Baseline guide](docs/baselines.md) |
 | Paper benchmarks | Bühler Heston and AlphaZero Heston/GBM configurations, runners and source comparisons | [Paper benchmarks](docs/paper-benchmarks.md) |
 
-This is a private **v0.1 research alpha**. The book contains one stock and
+This is a **v0.1 research alpha**. The book contains one stock and
 configurable claims at zero rates and dividends. Built-ins include European
 options and a variance swap; users can supply their own instruments. Numerical and
 API checks cover selected cases; Bates tail-risk precision remains incomplete.
 
 ## Start here
 
-With [uv](https://docs.astral.sh/uv/getting-started/installation/) installed and
-access to the repository:
+With [uv](https://docs.astral.sh/uv/getting-started/installation/) installed:
 
 ```bash
 git clone https://github.com/0xC000005/hedging-gym.git
@@ -33,6 +33,35 @@ uv run --frozen python -m hedging_gym.quickstart --device cpu --paths 64
 The locked environment includes Python dependencies and QuantLib. The example
 runs complete episodes with scripted trades; its small sample illustrates the
 API rather than measuring hedging performance.
+
+## Implemented methods
+
+- Delta, delta-gamma and delta-variance, with optional fixed no-trade bands.
+- Deep Hedging with direct pathwise training, learned no-transaction bands,
+  full-network fine-tuning and task-embedding Adaptive Deep Hedging.
+- Hull/Cao DDPG, QR-D4PG and EX-DRL ports; upstream
+  PPO, CrossQ, TQC and SimBaV2 learners.
+- AlphaZero source and common-environment
+  implementations, CEM planning and hybrid policy optimization (HPO).
+- GEPS conditioning, Belief-context DH and AMAGO,
+  plus optional retrieval and pretraining extensions.
+
+The [method catalogue](docs/baselines.md) links each module, paper, upstream source
+and runner. It distinguishes published methods from local adaptations.
+Deep Bellman Hedging is not implemented in this release.
+
+Run a small Deep Hedging / learned-band comparison, including classical controls:
+
+```bash
+uv run --frozen python -m benchmarks.baselines --methods dh ntb
+```
+
+There is no published cross-method leaderboard yet. The defaults exercise the
+code; they are not paper-reproduction budgets. See
+[reproducibility](docs/baseline-implementation.md) for seeds, saved checkpoints,
+evaluation artifacts and comparison requirements. SB3-based methods need
+`uv sync --locked --group baselines`; external author runtimes have separate
+instructions in the catalogue.
 
 ## One complete batch
 
@@ -70,7 +99,7 @@ src/hedging_gym/
   evaluation.py      common controller evaluation
 benchmarks/          runnable comparisons and paper configuration files
 tests/               financial, API and baseline checks
-docs/                usage, sources and qualification evidence
+docs/                usage, sources and reproducible validation
 ```
 
 These modules are installed together in the single `hedging-gym` package.
@@ -84,11 +113,6 @@ and financial evaluator, while retaining their own learning procedures.
 The [baseline guide](docs/baselines.md) links implementations, sources,
 runners and qualification evidence, and explains [how to add a method](docs/baselines.md#add-a-method).
 
-Run comparisons from a checkout with `uv run --frozen python -m benchmarks.baselines`.
-Optional SB3 dependencies are available through the package's `baselines` extra;
-in a checkout, use `uv sync --locked --group baselines`. Optional external donor
-runtimes have their own setup instructions in the baseline guide.
-
 ## Reference
 
 - [Benchmark](docs/benchmark.md): defaults, financial equations, execution
@@ -97,3 +121,10 @@ runtimes have their own setup instructions in the baseline guide.
   a different settlement convention.
 - [Validation](docs/validation.md): reproducible checks and their limits.
 - [Related work](docs/related-work.md): papers and numerical implementations.
+- [Contributing](CONTRIBUTING.md): add a method, validate it and submit a pull request.
+
+## License
+
+Original code and documentation use the [MIT License](LICENSE).
+Incorporated third-party code retains its own license; see
+[Third-party notices](THIRD_PARTY_NOTICES.md) for source credits and licenses.

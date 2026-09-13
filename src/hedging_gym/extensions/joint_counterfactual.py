@@ -49,7 +49,7 @@ def joint_objective(policy, bank, *, time_index, zeta, algorithm="all_mode",
                else torch.ones_like(pathwise_cost))
     pathwise = (weights * pathwise_cost).sum(-1).mean()
     if score_scope == "sampled_date":
-        # Retain the first pilot's unbiased but noisy single-date estimator.
+    # Unbiased single-date estimator; variance can be high.
         baseline = policy.value_cost(observed.detach(), zeta).detach()
         score = bank.config.n_steps * mode_loss(policy.discrete(observed),
             branches["terminal_losses"], zeta, bank.config.risk, baseline=baseline,

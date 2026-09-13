@@ -168,7 +168,7 @@ def train_counterfactual(source_policy, train_bank, *, algorithm, zeta, seed=7,
     if train_bank.config.time_grid.trade_at_maturity:
         raise ValueError("counterfactual updates do not support trading at maturity")
     if checkpoint_path and Path(checkpoint_path).exists():
-        raise FileExistsError("use a new checkpoint path; this pilot does not resume")
+        raise FileExistsError("use a new checkpoint path; this trainer does not support resuming")
     bank = bank_to(train_bank, device)
     policy = deepcopy(source_policy).to(device=device, dtype=bank.spot.dtype)
     policy.eval().requires_grad_(False)

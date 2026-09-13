@@ -7,35 +7,35 @@ upstream code where applicable, and implementation notes.
 
 ## Method catalogue
 
-The implementation column distinguishes imported learners, paper-based ports
-and local adaptations. These are source descriptions, not separate method
-families or performance rankings. Detailed source changes are in the
-[implementation appendix](baseline-methods.md); dated results remain in
-[qualification evidence](baseline-implementation.md).
+The implementation column distinguishes upstream learners, ports and local
+adaptations. The [implementation appendix](baseline-methods.md) explains their
+mechanisms and financial changes. See [reproducibility](baseline-implementation.md)
+for running checks and designing comparisons. This catalogue is not a performance
+ranking.
 
-| Method / implementation | Source and implementation | Runner | Evidence |
+| Method / implementation | Source and implementation | Runner | Guide |
 |---|---|---|---|
 | [Delta](../src/hedging_gym/baselines/delta.py) | [model sensitivities](benchmark.md). Local sensitivity control; optional fixed band. | [baselines](../benchmarks/baselines.py), included classical control; `--delta-band` selects a fixed band | [Financial checks](validation.md) |
 | [Delta-gamma](../src/hedging_gym/baselines/delta_gamma.py) | [model sensitivities](benchmark.md). Local two-sensitivity control. | [baselines](../benchmarks/baselines.py), included classical control | [Financial checks](validation.md) |
 | [Delta-variance](../src/hedging_gym/baselines/delta_variance.py) | [model sensitivities](benchmark.md). Local two-sensitivity control. | [baselines](../benchmarks/baselines.py); [variance-swap task](paper-benchmarks.md) | [Financial checks](validation.md) |
-| [Deep Hedging (`dh`)](../src/hedging_gym/baselines/deep_hedging.py) | [Bühler et al.](https://arxiv.org/abs/1802.03042v1). Paper-mechanism PyTorch implementation. | [baselines](../benchmarks/baselines.py), `--methods dh`; [qualify_policies](../benchmarks/qualify_policies.py) | [Qualification](baseline-implementation.md) |
-| [No-transaction bands (`ntb`)](../src/hedging_gym/baselines/no_transaction_band.py) | [Imaki et al.](https://arxiv.org/abs/2103.01775v1), [PFHedge example](https://github.com/pfnet-research/pfhedge/blob/1fc08c73756bc6350f6a66977a5be97497d3bca0/README.md). Paper-mechanism implementation using the referenced band construction. | [baselines](../benchmarks/baselines.py), `--methods ntb`; [qualify_policies](../benchmarks/qualify_policies.py) | [Qualification](baseline-implementation.md) |
-| [Full-network fine-tuning (`finetune_dh`)](../src/hedging_gym/baselines/finetune_dh.py) | ordinary DH control. Ordinary full-network updating control. | [qualify_adaptation](../benchmarks/qualify_adaptation.py); [matched update comparison](fast-adaptation.md#does-freezing-the-shared-network-help) | [Qualification](baseline-implementation.md) |
-| [Adaptive Deep Hedging (`adaptive_dh`)](../src/hedging_gym/baselines/adaptive_deep_hedging.py) | [Schmid–Oeltz](https://arxiv.org/abs/2504.16436v1). Paper-mechanism task-embedding implementation. | [qualify_adaptation](../benchmarks/qualify_adaptation.py); [fast adaptation](fast-adaptation.md) | [Qualification](baseline-implementation.md) |
-| [Hull/Cao 2021 DDPG](../src/hedging_gym/baselines/hull_ddpg.py) | [author code](https://github.com/rotmanfinhub/deep-hedging-research/tree/b4d031a185fe2547dd81ad7a67081f6dbe52c5bc). Source-backed PyTorch port with disclosed corrections. | [qualify_hull_ddpg](../benchmarks/qualify_hull_ddpg.py), saved training/development banks | [Original-objective evidence](baseline-implementation.md) |
-| [PPO](../src/hedging_gym/baselines/ppo.py) | [Schulman et al.](https://arxiv.org/abs/1707.06347). Upstream Stable-Baselines3 learner. | [qualify_sb3](../benchmarks/qualify_sb3.py), saved banks | [Qualification](baseline-implementation.md) |
-| [CrossQ](../src/hedging_gym/baselines/crossq.py) | [Bhatt et al.](https://arxiv.org/abs/1902.05605v4). Upstream SB3-Contrib learner. | [qualify_off_policy](../benchmarks/qualify_off_policy.py), `--algorithm crossq` | [Completed, weak initial runs](baseline-implementation.md) |
-| [TQC](../src/hedging_gym/baselines/tqc.py) | [Kuznetsov et al.](https://proceedings.mlr.press/v119/kuznetsov20a.html). Upstream SB3-Contrib learner. | [qualify_off_policy](../benchmarks/qualify_off_policy.py), `--algorithm tqc` | [Completed, weak initial runs](baseline-implementation.md) |
-| [SimBaV2](../src/hedging_gym/baselines/simbav2.py) | [Lee et al.](https://arxiv.org/abs/2502.15280v2), [official learner](https://github.com/DAVIAN-Robotics/SimbaV2). Imported official JAX learner. | [qualify_simbav2](../benchmarks/qualify_simbav2.py), external donor and saved banks | [Completed, weak initial runs](baseline-implementation.md) |
+| [Deep Hedging (`dh`)](../src/hedging_gym/baselines/deep_hedging.py) | [Bühler et al.](https://arxiv.org/abs/1802.03042v1). PyTorch implementation of pathwise policy training. | [baselines](../benchmarks/baselines.py), `--methods dh`; [qualify_policies](../benchmarks/qualify_policies.py) | [Objective mapping](baseline-methods.md) |
+| [No-transaction bands (`ntb`)](../src/hedging_gym/baselines/no_transaction_band.py) | [Imaki et al.](https://arxiv.org/abs/2103.01775v1), [PFHedge example](https://github.com/pfnet-research/pfhedge/blob/1fc08c73756bc6350f6a66977a5be97497d3bca0/README.md). Learned band construction with pathwise training. | [baselines](../benchmarks/baselines.py), `--methods ntb`; [qualify_policies](../benchmarks/qualify_policies.py) | [Objective mapping](baseline-methods.md) |
+| [Full-network fine-tuning (`finetune_dh`)](../src/hedging_gym/baselines/finetune_dh.py) | Updates all DH network weights on the new task. | [qualify_adaptation](../benchmarks/qualify_adaptation.py) | [Adaptation](fast-adaptation.md) |
+| [Adaptive Deep Hedging (`adaptive_dh`)](../src/hedging_gym/baselines/adaptive_deep_hedging.py) | [Schmid–Oeltz](https://arxiv.org/abs/2504.16436v1). Shared network with trainable task embeddings. | [qualify_adaptation](../benchmarks/qualify_adaptation.py) | [Adaptation](fast-adaptation.md) |
+| [Hull/Cao 2021 DDPG](../src/hedging_gym/baselines/hull_ddpg.py) | [Author code](https://github.com/rotmanfinhub/deep-hedging-research/tree/b4d031a185fe2547dd81ad7a67081f6dbe52c5bc). PyTorch reimplementation with disclosed corrections. | [qualify_hull_ddpg](../benchmarks/qualify_hull_ddpg.py), saved training/development banks | [Source objective](baseline-methods.md) |
+| [PPO](../src/hedging_gym/baselines/ppo.py) | [Schulman et al.](https://arxiv.org/abs/1707.06347). Upstream Stable-Baselines3 learner. | [qualify_sb3](../benchmarks/qualify_sb3.py), saved banks | [Reward mapping](baseline-methods.md) |
+| [CrossQ](../src/hedging_gym/baselines/crossq.py) | [Bhatt et al.](https://arxiv.org/abs/1902.05605v4). Upstream SB3-Contrib learner. | [qualify_off_policy](../benchmarks/qualify_off_policy.py), `--algorithm crossq` | [Reward and replay](baseline-methods.md) |
+| [TQC](../src/hedging_gym/baselines/tqc.py) | [Kuznetsov et al.](https://proceedings.mlr.press/v119/kuznetsov20a.html). Upstream SB3-Contrib learner. | [qualify_off_policy](../benchmarks/qualify_off_policy.py), `--algorithm tqc` | [Reward and replay](baseline-methods.md) |
+| [SimBaV2](../src/hedging_gym/baselines/simbav2.py) | [Lee et al.](https://arxiv.org/abs/2502.15280v2), [official learner](https://github.com/DAVIAN-Robotics/SimbaV2). Imported official JAX learner. | [qualify_simbav2](../benchmarks/qualify_simbav2.py), external donor and saved banks | [Setup and checks](baseline-implementation.md) |
 | [AlphaZero source loop](../src/hedging_gym/baselines/source_alphazero.py) | [pinned Szehr code](https://github.com/plan64/minimalHedger_AlphaZero/tree/3111c378fcd17e45f94d2fc668a3aa117126ecba). Imported source search/training; policy-argmax deployment. | [qualify_source_alphazero](../benchmarks/qualify_source_alphazero.py); [Heston/GBM configurations](paper-benchmarks.md) | [Source-loop checks and limits](source-alphazero.md) |
-| [Hybrid policy optimization (`hpo`)](../src/hedging_gym/baselines/hpo.py) | [Alvo et al. code](https://github.com/MatiasAlvo/hybrid-rl/tree/e48ae86da1e8f14c93cbb56e48d87f8674228659). Source-backed mixed-gradient finance adaptation. | [baselines](../benchmarks/baselines.py), `--methods hpo`; [qualify_policies](../benchmarks/qualify_policies.py) | [Qualification](baseline-implementation.md) |
-| [CEM (`cem`)](../src/hedging_gym/baselines/cem.py) | [cross-entropy optimization](https://doi.org/10.1023/A:1010091220143). Local rollout planner; guided/refined variants share this implementation. | [baselines](../benchmarks/baselines.py), `cem` / `hpo_cem` / `hpo_gradient`; [qualify_search](../benchmarks/qualify_search.py) | [Search qualification](baseline-implementation.md) |
-| [QR-D4PG port (`hull_rl`)](../src/hedging_gym/baselines/qr_d4pg.py) | [Cao/Hull 2023 code](https://github.com/rotmanfinhub/gamma-vega-rl-hedging/tree/77dc48326da000d983b1fb750edb2177e38c75fd). Maintained PyTorch global-risk port, distinct from historical author-learner runs. | [qualify_model_free](../benchmarks/qualify_model_free.py), `--method hull_rl` | [Port versus original learner](baseline-methods.md#training-objectives-are-not-interchangeable) |
-| [EX-D4PG port (`exdrl`)](../src/hedging_gym/baselines/exdrl.py) | [EX-DRL code](https://github.com/pmalekzadeh/EX-DRL/tree/f1abe99df7fa9efaa65af6b9dd416c3425c64098). Maintained PyTorch global-risk port, distinct from historical author-learner runs. | [qualify_model_free](../benchmarks/qualify_model_free.py), `--method exdrl` | [Port versus original learner](baseline-methods.md#training-objectives-are-not-interchangeable) |
-| [Common AlphaZero (`alphazero`)](../src/hedging_gym/baselines/alphazero.py) | [Szehr-derived search](baseline-methods.md#method-mapping). Maintained stochastic-search and terminal-ES adaptation. | [qualify_alphazero](../benchmarks/qualify_alphazero.py), configured finite holding grid | [Qualification](baseline-implementation.md) |
-| [GEPS conditioning](../src/hedging_gym/baselines/geps.py) | [published layer mechanism](geps-adaptation.md#pinned-authority). Published conditioning-layer transfer. | [compare_fast_adaptation](../benchmarks/compare_fast_adaptation.py), `--method geps` | [Source parity and limits](geps-adaptation.md) |
-| [Belief-context DH](../src/hedging_gym/baselines/belief_adaptation.py) | [Belief-FB encoder source](belief-adaptation.md#pinned-source-and-actual-reuse). Published dynamics-encoder transfer. | [compare_fast_adaptation](../benchmarks/compare_fast_adaptation.py), `--method belief` | [Encoder transfer and limits](belief-adaptation.md) |
-| [AMAGO](../src/hedging_gym/baselines/amago.py) | [AMAGO](https://arxiv.org/abs/2310.09971), [AMAGO-2](https://arxiv.org/abs/2411.11188); [official donor](amago-context.md). Imported official AMAGO and AMAGO-2 learners. | [qualify_amago_hedging](../benchmarks/qualify_amago_hedging.py), `--agent-type agent` or `multitask` | [Memory qualification](amago-context.md) |
+| [Hybrid policy optimization (`hpo`)](../src/hedging_gym/baselines/hpo.py) | [Alvo et al. code](https://github.com/MatiasAlvo/hybrid-rl/tree/e48ae86da1e8f14c93cbb56e48d87f8674228659). Mixed-gradient finance adaptation. | [baselines](../benchmarks/baselines.py), `--methods hpo`; [qualify_policies](../benchmarks/qualify_policies.py) | [Update mechanism](baseline-methods.md) |
+| [CEM (`cem`)](../src/hedging_gym/baselines/cem.py) | [Cross-entropy optimization](https://doi.org/10.1023/A:1010091220143). Local rollout planner; guided/refined variants share this implementation. | [baselines](../benchmarks/baselines.py), `cem` / `hpo_cem` / `hpo_gradient`; [qualify_search](../benchmarks/qualify_search.py) | [Search mechanism](baseline-methods.md) |
+| [QR-D4PG (`hull_rl`)](../src/hedging_gym/baselines/qr_d4pg.py) | [Cao/Hull 2023 code](https://github.com/rotmanfinhub/gamma-vega-rl-hedging/tree/77dc48326da000d983b1fb750edb2177e38c75fd). Local quantile critic with the attributed shared learner and global terminal-risk objective. | [qualify_model_free](../benchmarks/qualify_model_free.py), `--method hull_rl` | [Port versus source](baseline-methods.md#training-objectives-are-not-interchangeable) |
+| [EX-D4PG port (`exdrl`)](../src/hedging_gym/baselines/exdrl.py) | [EX-DRL code](https://github.com/pmalekzadeh/EX-DRL/tree/f1abe99df7fa9efaa65af6b9dd416c3425c64098). Local quantile critic with the attributed shared learner and global terminal-risk objective. | [qualify_model_free](../benchmarks/qualify_model_free.py), `--method exdrl` | [Port versus source](baseline-methods.md#training-objectives-are-not-interchangeable) |
+| [Common AlphaZero (`alphazero`)](../src/hedging_gym/baselines/alphazero.py) | [Szehr-inspired search](baseline-methods.md#method-mapping). Stochastic-search and terminal-ES adaptation. | [qualify_alphazero](../benchmarks/qualify_alphazero.py), configured finite holding grid | [Search mechanism](baseline-methods.md) |
+| [GEPS conditioning](../src/hedging_gym/baselines/geps.py) | [Published layer mechanism](geps-adaptation.md). Context-conditioned layers in a DH policy. | [compare_fast_adaptation](../benchmarks/compare_fast_adaptation.py), `--method geps` | [Source mapping and limits](geps-adaptation.md) |
+| [Belief-context DH](../src/hedging_gym/baselines/belief_adaptation.py) | [Belief-FB encoder source](belief-adaptation.md). Dynamics-encoder transfer into DH. | [compare_fast_adaptation](../benchmarks/compare_fast_adaptation.py), `--method belief` | [Encoder transfer and limits](belief-adaptation.md) |
+| [AMAGO](../src/hedging_gym/baselines/amago.py) | [AMAGO](https://arxiv.org/abs/2310.09971), [AMAGO-2](https://arxiv.org/abs/2411.11188); [official donor](amago-context.md). Imported official AMAGO and AMAGO-2 learners. | [qualify_amago_hedging](../benchmarks/qualify_amago_hedging.py), `--agent-type agent` or `multitask` | [Sequence interface and setup](amago-context.md) |
 
 Fixed delta bands, guided/refined CEM and AMAGO's `agent`/`multitask` selection
 are configurations of their respective modules, not duplicate implementations.
@@ -48,13 +48,13 @@ and AlphaZero Heston/GBM tasks and their differences from published settings.
 These additions operate on an existing policy; they do not define independent
 hedgers. The runner identifies which policy receives the extension.
 
-| Addition / implementation | Source and host method | Runner | Evidence |
+| Addition / implementation | Source and host method | Runner | Guide |
 |---|---|---|---|
-| [Skill retrieval](../src/hedging_gym/extensions/skill_retrieval.py) | [SRSA transfer mapping](skill-retrieval.md#source-and-finance-mapping). Published retrieval-predictor transfer. | [compare_fast_adaptation](../benchmarks/compare_fast_adaptation.py), retrieval review | [Retrieval checks and limits](skill-retrieval.md) |
-| [Adaptation-aware pretraining](../src/hedging_gym/extensions/meta_pretraining.py) | [first-order MAML mapping](fast-adaptation.md#pretrain-for-adaptation-or-simply-train-longer). First-order MAML principle adapted to hedging. | [compare_adapt_aware](../benchmarks/compare_adapt_aware.py), `meta` and ordinary controls | [Pretraining comparison](baseline-implementation.md) |
-| [Counterfactual mode credit](../src/hedging_gym/extensions/counterfactual.py) | local [shared-continuation comparison](counterfactual-update.md). Local HPO policy extension. | [qualify_counterfactual](../benchmarks/qualify_counterfactual.py) | [Mode-credit qualification](counterfactual-update.md) |
-| [Joint counterfactual updates](../src/hedging_gym/extensions/joint_counterfactual.py) | [HPO extension](joint-counterfactual.md). Local mixed-gradient extension. | [qualify_counterfactual](../benchmarks/qualify_counterfactual.py), `--joint` | [Joint-update qualification](joint-counterfactual.md) |
-| [Task curriculum](../src/hedging_gym/extensions/curriculum.py) | [ACCEL](https://proceedings.mlr.press/v162/parker-holder22a.html). Local finite-task sampler inspired by ACCEL. | [qualify_curriculum](../benchmarks/qualify_curriculum.py), declared A/B mixture | [Qualification](baseline-implementation.md) |
+| [Skill retrieval](../src/hedging_gym/extensions/skill_retrieval.py) | [SRSA transfer mapping](skill-retrieval.md). Selects an initial context from a frozen Adaptive DH library. | [compare_fast_adaptation](../benchmarks/compare_fast_adaptation.py) | [Retrieval checks and limits](skill-retrieval.md) |
+| [Adaptation-aware pretraining](../src/hedging_gym/extensions/meta_pretraining.py) | [First-order MAML mapping](fast-adaptation.md). Pretrains the Adaptive DH network and task vectors for subsequent updates. | [compare_adapt_aware](../benchmarks/compare_adapt_aware.py), `meta` and ordinary controls | [Adaptation procedures](fast-adaptation.md) |
+| [Counterfactual mode credit](../src/hedging_gym/extensions/counterfactual.py) | Local [shared-continuation comparison](counterfactual-update.md) for HPO's categorical decisions. | [qualify_counterfactual](../benchmarks/qualify_counterfactual.py) | [Mode-credit update](counterfactual-update.md) |
+| [Joint counterfactual updates](../src/hedging_gym/extensions/joint_counterfactual.py) | [HPO extension](joint-counterfactual.md) updating categorical decisions and continuous sizing. | [qualify_counterfactual](../benchmarks/qualify_counterfactual.py), `--joint` | [Joint update](joint-counterfactual.md) |
+| [Task curriculum](../src/hedging_gym/extensions/curriculum.py) | [ACCEL](https://proceedings.mlr.press/v162/parker-holder22a.html)-inspired finite-task sampler for DH, with importance weighting to preserve the declared mixture. | [qualify_curriculum](../benchmarks/qualify_curriculum.py), declared A/B mixture | [Reproducibility](baseline-implementation.md) |
 
 ## Use a baseline
 
@@ -68,7 +68,8 @@ uv run --frozen python -m benchmarks.baselines --help
 The default example uses 128 training paths, a separate 128-path evaluation bank,
 eight updates, minibatches of 32 and hidden layers of 32, 32. Policy seed is 7;
 training and evaluation seeds are 1101 and 2201. These small defaults demonstrate
-execution. Use the linked qualification runners for substantive comparisons.
+execution. The linked runners expose longer training recipes; choose and report
+the data, objective and compute budget before making a substantive comparison.
 
 Policy constructors derive their schema and action sizes from the configuration:
 
@@ -96,11 +97,11 @@ uv run --frozen --group baselines python -m benchmarks.qualify_sb3 --help
 ```
 
 SimBaV2 and AMAGO need their pinned external donor environments; the AlphaZero
-source runner needs its [pinned checkout](source-alphazero.md#run-a-bounded-qualification).
+source runner needs its [pinned checkout](source-alphazero.md).
 Run artifacts and checkpoints belong outside Git. `--checkpoint-dir` and
 `--resume-from` in the common runner retain learner state; resuming requires the
-same configuration, training bank, seed and recipe. Historical runs use their
-archived source and artifacts.
+same configuration, training bank, seed and recipe. Record the source revision
+with every run; checkpoint compatibility across source revisions is not guaranteed.
 
 ## Shared interface, separate learners
 

@@ -1,6 +1,6 @@
 # Hedging Gym
 
-This private research repository owns the financial environment, baseline
+This research repository owns the financial environment, baseline
 methods and paper benchmarks in one `hedging-gym` package.
 
 ## Structure and scientific contract
@@ -61,6 +61,9 @@ methods and paper benchmarks in one `hedging-gym` package.
   Batch independent work where worthwhile; don't leave an opaque serial run.
 - Keep checkpoints, raw results and logs outside Git. No custom hashes,
   registries, dashboards, workflow engines or extra testing frameworks.
+- Documentation should explain usage, sources and reproducible validation.
+  Keep internal approvals, machine-specific paths and temporary result diaries
+  out of the repository. Preserve useful seeds, configurations and source notes.
 - Do not add legacy checkpoint compatibility layers: current checkpoints must
   match explicit configuration; historical runs use archived source and artifacts.
 
@@ -70,10 +73,8 @@ methods and paper benchmarks in one `hedging-gym` package.
   independent parallel edits. Reserve file ownership before parallel work.
 - Stage explicit files, review the diff and make one coherent commit per change.
   Squash fixups at integration; do not import the old experiment commit history.
-- The user approved the 2026-09-12 closeout: integrate the reviewed squash,
-  push main and the evidence tag, then remove only the audited stale worktrees
-  and branches after verifying their remote preservation.
-- Push only to the intended private remote. Subsequent main merges need user
-  approval. Preserve unrelated edits and historical research evidence.
+- Use pull requests for integration. Preserve unrelated edits and upstream
+  attribution. Do not change repository visibility or rewrite published history
+  as part of ordinary source cleanup.
 - Remove a completed worktree/branch only after its retained work is integrated;
   a worktree is not an archive. Preserve historical research evidence.
