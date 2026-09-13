@@ -39,6 +39,7 @@ API rather than measuring hedging performance.
 - Delta, delta-gamma and delta-variance, with optional fixed no-trade bands.
 - Deep Hedging with direct pathwise training, learned no-transaction bands,
   full-network fine-tuning and task-embedding Adaptive Deep Hedging.
+- Deep Bellman Hedging with actor-critic training and monetary-utility targets.
 - Hull/Cao DDPG, QR-D4PG and EX-DRL ports; upstream
   PPO, CrossQ, TQC and SimBaV2 learners.
 - AlphaZero source and common-environment
@@ -48,7 +49,9 @@ API rather than measuring hedging performance.
 
 The [method catalogue](docs/baselines.md) links each module, paper, upstream source
 and runner. It distinguishes published methods from local adaptations.
-Deep Bellman Hedging is not implemented in this release.
+For Deep Bellman Hedging (`dbh`), see the
+[objective mapping](docs/baseline-methods.md#training-objectives-are-not-interchangeable)
+before comparing nested and terminal risk measures.
 
 Run a small Deep Hedging / learned-band comparison, including classical controls:
 
