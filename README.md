@@ -100,9 +100,12 @@ src/hedging_gym/
 benchmarks/          runnable comparisons and paper configuration files
 tests/               financial, API and baseline checks
 docs/                usage, sources and reproducible validation
+formal/              standalone Lean proofs for Deep Bellman Hedging
 ```
 
-These modules are installed together in the single `hedging-gym` package.
+The Python modules under `src/hedging_gym/` are installed together in the single
+`hedging-gym` package. The separate [formal proofs](formal/README.md) have their
+own Lean build and theorem scope.
 Methods use the environment directly or through library adapters;
 the environment does not import learners. The package root keeps convenient
 public imports such as `HedgingVectorEnv` and `benchmark_config`.
