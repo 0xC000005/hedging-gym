@@ -7,7 +7,7 @@ import Mathlib.Tactic
 
 Paper proposition: if the market has only finite statistical arbitrage,
 `γ = sup_π E[G^π(0)] < ∞`, then `U[G^π(z)] ≤ E[G^0(z)] + γ` for every policy `π` and
-portfolio `z`. The footnote proof uses only risk aversion `U ≤ E`, additivity of the
+portfolio `z`. The proof in footnote 16 uses only risk aversion `U ≤ E`, additivity of the
 expectation, and the decomposition `G^π(z) = G^0(z) + G^π(0)` of gains into the
 untraded portfolio's gains and the gains of trading from an empty book; those are the
 hypotheses here.

@@ -2,9 +2,9 @@ import DeepBellmanHedging.MonetaryUtility
 import DeepBellmanHedging.Contraction
 
 /-!
-# The vanilla Deep Hedging Bellman equation (Theorem 2, existence and uniqueness)
+# The vanilla Deep Hedging Bellman equation (Theorem 3, existence and uniqueness)
 
-Paper section 4, equation (20):
+Paper section 4, equation (18):
 `(T̃f)(z, m) = sup_a (1/β_T(m)) U[β_T(M') f(z' + a·h', M') | m] + R̃(a; z, m)`
 with the numeraire `β_T(M') = β(m) β_T(m)` and today's cashflow rewards `R̃`.
 Section 5.1 shows the discounted cash-invariance `T̃(f + c) = T̃f + β(m) c`, so `T̃` is
@@ -50,7 +50,7 @@ def discounted (f : S → ℝ) (s : S) (a : A) : Ω → ℝ :=
 def actionValue (f : S → ℝ) (s : S) (a : A) : ℝ :=
   (M.numeraire s)⁻¹ * M.utility s (M.discounted f s a) + M.cashflow s a
 
-/-- Paper equation (20). -/
+/-- Paper equation (18). -/
 def bellmanFun (f : S → ℝ) (s : S) : ℝ := ⨆ a : M.admissible s, M.actionValue f s a
 
 theorem numeraire_next_nonneg (s : S) (a : A) (ω : Ω) : 0 ≤ M.numeraire (M.next s a ω) := by
@@ -177,7 +177,7 @@ theorem bellman_cash (f : S →ᵇ ℝ) (c : ℝ) (hc : 0 ≤ c) :
         unfold bellmanFun
         exact add_le_add (le_ciSup (M.bddAbove_actionValue f s) a) hβ
 
-/-- **Theorem 2** (`th:convergence_dh`, existence and uniqueness part). -/
+/-- **Theorem 3** (`th:convergence_dh`, existence and uniqueness part). -/
 theorem existsUnique_value (hβ : M.βstar < 1) : ∃! V : S →ᵇ ℝ, M.bellman V = V :=
   existsUnique_fixedPoint_of_monotone_cash hβ M.bellman_monotone M.bellman_cash
 

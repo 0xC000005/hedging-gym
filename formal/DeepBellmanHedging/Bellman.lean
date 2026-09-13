@@ -10,7 +10,7 @@ Bellman operator is `(Tf)(s) = sup_a U_s[ β(s) f(next(s, a, ω)) + R(a; s, ω) 
 (paper equation (3)). With bounded `f`, monotonicity and cash-invariance of `U_s`
 make `T` a `β*`-contraction, so the equation has a unique bounded solution.
 
-The paper's "rewards are finite" hypothesis (equation (6)) is pointwise in `s`; the
+The paper's "rewards are finite" hypothesis (equation (4)) is pointwise in `s`; the
 sup-norm argument needs `T0` itself to be bounded, so `reward_bound` is stated
 uniformly in `s`. See `formal/README.md`.
 -/
@@ -144,7 +144,7 @@ bounded solution. -/
 theorem existsUnique_value (hβ : M.βstar < 1) : ∃! V : S →ᵇ ℝ, M.bellman V = V :=
   existsUnique_fixedPoint_of_monotone_cash hβ M.bellman_monotone M.bellman_cash
 
-/-- Value iteration converges to the solution from any bounded start (footnote 13). -/
+/-- Value iteration converges to the solution from any bounded start (footnote 18). -/
 theorem tendsto_iterate_value (hβ : M.βstar < 1) (V₀ : S →ᵇ ℝ) :
     ∃ V : S →ᵇ ℝ, M.bellman V = V ∧
       Filter.Tendsto (fun n ↦ M.bellman^[n] V₀) Filter.atTop (nhds V) :=

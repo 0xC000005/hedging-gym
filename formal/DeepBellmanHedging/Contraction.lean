@@ -8,7 +8,7 @@ The core of both existence theorems in *Deep Bellman Hedging* (section 5, proof 
 Theorem 1): an operator on bounded functions that is monotone and shifts by at most
 `β·c` when its argument shifts by a constant `c ≥ 0` is a `β`-contraction in the
 supremum norm. The Banach fixed-point theorem then gives a unique fixed point and
-convergence of value iteration, which is the paper's footnote 13 argument.
+convergence of value iteration, which is the paper's footnote 18 argument.
 -/
 
 open BoundedContinuousFunction Filter
@@ -48,7 +48,7 @@ theorem existsUnique_fixedPoint_of_monotone_cash {T : (S →ᵇ ℝ) → (S →�
     fun W hW ↦ h.fixedPoint_unique' hW h.fixedPoint_isFixedPt⟩
 
 /-- Value iteration `V⁽ⁿ⁾ = T V⁽ⁿ⁻¹⁾` converges to the fixed point from any start
-(footnote 13). -/
+(footnote 18). -/
 theorem tendsto_iterate_of_monotone_cash {T : (S →ᵇ ℝ) → (S →ᵇ ℝ)} {β : NNReal}
     (hβ : β < 1) (hmono : Monotone T)
     (hcash : ∀ (f : S →ᵇ ℝ) (c : ℝ), 0 ≤ c → T (f + const S c) ≤ T f + const S (β * c))
