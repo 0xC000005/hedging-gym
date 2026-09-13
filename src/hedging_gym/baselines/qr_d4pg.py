@@ -3,10 +3,11 @@
 Paper: Gamma and Vega Hedging Using Deep Distributional Reinforcement Learning.
 https://doi.org/10.3389/frai.2023.1129370
 Author source: agent/learning.py and agent/distributional.py at the pinned URL
-below. This batched PyTorch port retains quantile targets and deterministic
+below. The local PyTorch critic retains quantile targets and deterministic
 actor gradients, but uses uniform replay, Polyak targets and the common global
 terminal-ES objective instead of native conditional VaR/CVaR. It is not the
-authors' TensorFlow option-arrival reproduction. See docs/baseline-methods.md.
+authors' TensorFlow option-arrival reproduction. The shared learner retains
+its upstream Apache-2.0 notice. See docs/baseline-methods.md.
 """
 import torch
 from torch import nn

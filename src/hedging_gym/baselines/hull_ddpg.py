@@ -5,7 +5,8 @@ https://ssrn.com/abstract=3514586.
 Upstream: https://github.com/rotmanfinhub/deep-hedging-research/tree/b4d031a185fe2547dd81ad7a67081f6dbe52c5bc
 Implementation notes: docs/baseline-methods.md.
 
-This PyTorch port controls common-task holdings using the shared observations.
+This PyTorch reimplementation follows the paper and pinned author reference
+implementation. It controls common-task holdings using the shared observations.
 Dense net-portfolio P&L telescopes to terminal P&L. The original mean-minus-
 1.5-standard-deviation objective is distinct from terminal ES and QR-D4PG.
 

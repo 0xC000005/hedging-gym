@@ -1,8 +1,12 @@
 # Related work
 
-These references explain the research ideas and numerical constructions used
-here. The benchmark and method adapters make their own disclosed choices;
-they do not reproduce the cited papers' complete experiments.
+These references explain the implemented learning mechanisms, benchmark choices
+and numerical calculations. The [baseline catalogue](baselines.md) links each
+method to its module and runner; the [implementation guide](baseline-methods.md)
+records financial adaptations. A citation identifies a source, not a claim to
+reproduce its complete experiments or reported performance.
+
+## Learning and hedging methods
 
 | Reference | Connection to this repository |
 |---|---|
@@ -14,11 +18,20 @@ they do not reproduce the cited papers' complete experiments.
 | Cao et al., [Gamma and Vega Hedging Using Deep Distributional Reinforcement Learning](https://www.frontiersin.org/journals/artificial-intelligence/articles/10.3389/frai.2023.1129370/full), [author code](https://github.com/rotmanfinhub/gamma-vega-rl-hedging/tree/77dc48326da000d983b1fb750edb2177e38c75fd) | QR-D4PG estimates a conditional return distribution for an option-arrival book with automatic stock delta hedging. The common task instead lets the policy choose stock and option holdings jointly. |
 | Malekzadeh et al., [EX-DRL](https://arxiv.org/abs/2408.12446), [author code](https://github.com/pmalekzadeh/EX-DRL/tree/f1abe99df7fa9efaa65af6b9dd416c3425c64098) | Extends quantile distributional RL with a generalized Pareto tail. Native VaR/CVaR objectives must be distinguished from the common benchmark's reported terminal ES. |
 | Szehr, [Hedging of Financial Derivative Contracts via Monte Carlo Tree Search](https://arxiv.org/abs/2102.06274), [author code](https://github.com/plan64/minimalHedger_AlphaZero/tree/3111c378fcd17e45f94d2fc668a3aa117126ecba) | Policy/value-guided search and visit-target training in trinomial, GBM and Heston environments. This release is not the complete implementation of the later non-convex comparison by Maggiolo et al. |
-| Schmid and Oeltz, [Towards a fast and robust deep hedging approach](https://arxiv.org/abs/2504.16436v1) | `src/hedging_gym/baselines/adaptive_deep_hedging.py` adapts the shared-network/task-embedding mechanism: fit source-market embeddings jointly, then fit a new embedding with shared weights frozen. The A → B → A sequence is our separate adaptation/forgetting evaluation. |
+| Schmid and Oeltz, [Towards a fast and robust deep hedging approach](https://arxiv.org/abs/2504.16436v1) | [Adaptive DH](../src/hedging_gym/baselines/adaptive_deep_hedging.py) fits source-market embeddings jointly, then fits a new embedding with shared weights frozen. The A → B → A sequence is a separate adaptation/forgetting evaluation. |
 | Alvo, Russo and Kanoria, [Hybrid Policy Optimization](https://arxiv.org/abs/2605.14297), [author code](https://github.com/MatiasAlvo/hybrid-rl/tree/e48ae86da1e8f14c93cbb56e48d87f8674228659) | Combines discrete-action score gradients with differentiable continuous decisions. Our adapter uses HOLD/TRADE modes and differentiable sizing through the same financial ledger. |
 | Bhatt et al., [CrossQ: Batch Normalization in Deep Reinforcement Learning for Greater Sample Efficiency and Simplicity](https://arxiv.org/abs/1902.05605v4), ICLR 2024; [author code](https://github.com/adityab/CrossQ) | Continuous-control baseline using batch normalization and no target networks. We use the maintained SB3-Contrib implementation; its native continuous-control results are motivation, not evidence of better hedging. |
 | Kuznetsov et al., [Controlling Overestimation Bias with Truncated Mixture of Continuous Distributional Quantile Critics](https://proceedings.mlr.press/v119/kuznetsov20a.html), ICML 2020; [SB3-Contrib TQC](https://sb3-contrib.readthedocs.io/en/master/modules/tqc.html) | TQC truncates an ensemble of quantile-critic predictions to control value overestimation. It is a separate baseline from CrossQ. Its distributional critic does not by itself make the training objective expected shortfall. |
 | Lee et al., [Hyperspherical Normalization for Scalable Deep Reinforcement Learning](https://arxiv.org/abs/2502.15280v2), ICML 2025 Spotlight; [author code](https://github.com/DAVIAN-Robotics/SimbaV2) | SimBaV2 stabilizes SAC-style continuous-control training through normalized representations/weights and distributional value estimation. We retain the official learner and bridge it to the common financial environment. This is not the separate contrastive-RL depth-scaling paper. |
+
+Source mappings for [GEPS conditioning](geps-adaptation.md),
+[Belief-FB encoder transfer](belief-adaptation.md), [AMAGO](amago-context.md),
+[skill retrieval](skill-retrieval.md), [adaptation-aware pretraining](fast-adaptation.md)
+and [counterfactual updates](counterfactual-update.md) are in their method guides.
+These guides distinguish imported learners, equation-based implementations and
+local extensions.
+
+## Simulation and numerical references
 
 The Heston variance/stock step uses Andersen's quadratic-exponential construction.
 The default `scheme="qe_m"` adds the conditional stock martingale correction in
@@ -37,5 +50,5 @@ and [Bates process](https://github.com/lballabio/QuantLib/blob/v1.43/ql/processe
 Reference agreement is evidence for the checked states and tolerances; the
 [validation guide](validation.md) describes its limits.
 
-The [implementation appendix](baseline-methods.md) separates each source method,
-its common-task changes, and the checks needed before interpreting its results.
+Use the [reproducibility guide](baseline-implementation.md) to select checks and
+record the source revisions, task configuration and compute needed for a run.

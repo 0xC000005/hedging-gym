@@ -5,7 +5,8 @@ Search, https://arxiv.org/abs/2102.06274.
 Upstream: https://github.com/plan64/minimalHedger_AlphaZero/tree/3111c378fcd17e45f94d2fc668a3aa117126ecba
 (MCTS.py and Trainer.py). Implementation notes: docs/baseline-methods.md.
 
-This maintained common-environment implementation uses a configured holding
+This local implementation is informed by Szehr's paper and reference code,
+with its own search and training loops. It uses a configured holding
 lattice, legal-action masking, continuous-market chance nodes and terminal ES.
 Chance outcomes are sampled uniformly, never selected as profitable actions.
 Separate actor/critic fitting, marked-wealth features and completed greedy
