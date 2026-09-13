@@ -18,6 +18,7 @@ from hedging_gym.baselines._shared.training import _report
 from hedging_gym.baselines.adaptive_deep_hedging import train_multitask
 from hedging_gym.baselines.alphazero import alphazero_controller, train_alphazero
 from hedging_gym.baselines.cem import RolloutPlanner
+from hedging_gym.baselines.deep_bellman_hedging import train_deep_bellman
 from hedging_gym.baselines.deep_hedging import train as train_dh
 from hedging_gym.baselines.delta import make_controller as delta_controller
 from hedging_gym.baselines.delta_gamma import make_controller as delta_gamma_controller
@@ -39,7 +40,7 @@ from hedging_gym.environment.finance import (
 from hedging_gym.evaluation import evaluate_controller
 
 METHOD_LABELS = {
-    "dh": "Deep Hedging", "ntb": "Learned no-transaction bands",
+    "dh": "Deep Hedging", "ntb": "Learned no-transaction bands", "dbh": "Deep Bellman Hedging",
     "hull_rl": "Hull/Rotman QR-D4PG adaptation", "exdrl": "EX-D4PG tail-risk adaptation",
     "finetune_dh": "Online fine-tuned Deep Hedging", "adaptive_dh": "Task-embedding Deep Hedging",
     "alphazero": "Stochastic AlphaZero adaptation", "cem": "Unguided CEM + DH continuation",
@@ -170,6 +171,8 @@ def main(argv=None):
             method_options["resume_from"] = args.resume_from
         if method in ("dh", "ntb"):
             pair = {'dh': train_dh, 'ntb': train_ntb}[method](train_bank, **method_options)
+        elif method == "dbh":
+            pair = train_deep_bellman(train_bank, **method_options)
         elif method in ("hull_rl", "exdrl"):
             pair = {'hull_rl': train_qr_d4pg, 'exdrl': train_exdrl}[method](train_bank, **method_options)
         elif method == "finetune_dh":

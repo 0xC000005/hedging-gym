@@ -43,6 +43,7 @@ convergence or strong-baseline performance.
 | Delta-variance | Match liability delta and variance sensitivity using stock and a variance-sensitive claim | Uses the configured hedge instruments and shared sensitivities; does not optimize ES. |
 | Deep Hedging | Differentiate terminal portfolio loss through causal trading decisions | PyTorch policy and common accounting; configured target holdings and risk objective. ES training also fits its threshold. Market simulation does not expose future observations to the policy. |
 | No-transaction bands | Learn an interval of acceptable holdings; trade to its boundary when outside | One interval per instrument, with learned centers and widths. This is a band architecture, not ordinary delta hedging. |
+| Deep Bellman Hedging | Actor-critic value iteration: the critic learns the risk-adjusted excess value of a book; the actor and an OCE shift network maximize the one-step monetary-utility Bellman target | PyTorch implementation of the paper's equations on the Deep Hedging actor. Rewards are one-step marked-wealth changes from the shared ledger; the reward enters the utility as in the paper's definition; cash is not a network input; training books are randomized holdings on simulated paths rather than tabulated history. The CVaR utility equals the ES threshold form pointwise, but its nested recursion is a different terminal objective (below). |
 | Cao/Hull 2021 DDPG | Prioritized replay, target actor/critics, first- and second-moment Bellman targets, actor improvement through critics | Joint stock/call actions replace stock-only trading. The source mean-plus-standard-deviation objective is distinct from ES. Any source-code versus paper-equation corrections are disclosed separately. |
 | QR-D4PG (`qr_d4pg.py`) | Quantile critic and deterministic actor gradients through estimated terminal risk | Local PyTorch quantile critic with the attributed shared learner, uniform replay, Polyak targets and a global terminal-ES objective. Joint holdings replace the source option action and automatic delta hedge. |
 | EX-D4PG (`exdrl.py`) | Quantile critic with a fitted generalized Pareto tail in targets and actor improvement | Maintained PyTorch port with the same global-risk collector; inverse-CDF quadrature and analytic tail expectations replace sampled tail integration. |
@@ -85,6 +86,54 @@ Where a method supports `RiskConfig(objective="mse")`, its objective is the
 sample mean of $L^2$ and no ES threshold is needed. Support is method-specific;
 changing the evaluation metric does not convert an ES-trained policy into an
 MSE-trained comparator. Trading costs are already included in $L$.
+
+`RiskConfig(objective="entropy", risk_aversion=\lambda)` selects the entropic
+risk $\frac1\lambda \log \mathbb{E}[e^{\lambda L}]$, the exponential-utility
+certainty equivalent (Föllmer and Schied). Pathwise trainers use its optimized
+certainty equivalent form $\zeta + \mathbb{E}[(e^{\lambda(L-\zeta)}-1)/\lambda]$
+(Ben-Tal and Teboulle 2007) with the same jointly fitted threshold as ES; the
+minimum over $\zeta$ is the entropic risk itself. The shared evaluator reports
+the pooled closed form, checked in `tests/test_config.py` against pfhedge's
+`EntropicRiskMeasure` and the Gaussian identity $\mu + \lambda\sigma^2/2$. The
+entropic risk is the only optimized certainty equivalent besides the mean that
+is time-consistent, which is what makes it the objective for comparing terminal
+pathwise training with Bellman-style recursive training.
+
+Deep Bellman Hedging optimizes a *nested* monetary utility: each date applies
+the utility to its reward plus the next date's value. Nested risk measures are
+time-consistent by construction, but the nested CVaR composition is not the
+evaluator's terminal ES; only the entropic utility and the mean make nested and
+terminal objectives coincide (the paper's Theorem 2 at zero rates). Report
+`dbh` with the CVaR utility on an ES task as a different objective, and use
+`objective="entropy"` for a like-for-like comparison with pathwise Deep Hedging.
+
+In this implementation and at the budgets tested, the one-step estimator is
+weak for hedging: a one-day target carries one day of variance against one
+daily move of noise, so the policy's inter-temporal cost-versus-risk trade-off
+must come from the critic's derivative in holdings, which the semi-gradient
+regression on noisy targets did not resolve here. Three options of
+`train_deep_bellman` change the estimator, not the objective: `steps=n` uses
+the paper's n-step operator $T_n$ (rewards of n decisions by the current policy
+with pathwise gradients, then the continuation value; the horizon gives the
+pathwise Deep Hedging objective per sampled state), `scenarios=K` averages the
+one-step target over K fresh conditional continuations instead of the bank's
+next day, and `aggregate="entropic"` replaces the learned OCE shift by the
+closed-form entropic certainty equivalent of those scenarios. That last form is
+a logarithm of a finite-K sample mean, so its expectation is not the entropic
+operator even with unlimited fresh batches: the finite-K bias persists and can
+move the maximizing action, which distinguishes it from merely lowering target
+noise; the default OCE integrand has no such bias. Declare the values used;
+`steps=1, scenarios=1` is the published scheme. The paper's Remark 2 notes that
+the fixed point of $T_n$ differs from that of $T$ unless the utility is
+time-consistent: at the zero rates enforced here ($\beta = 1$) the entropic
+utility and the mean make the two coincide, so `steps=n` changes only the
+estimator (with discounting they differ even then, because a discount factor
+inside the utility rescales the risk aversion); with the CVaR utility `steps>1`
+optimizes a different nested objective and must be reported as such. The authors' numerical companion (Murray et al., ICAIF 2022)
+does not run the bare scheme either: it adds a Polyak-averaged target critic,
+an actor skip connection over the Black-Scholes delta, a critic residual over
+the book value, on-policy state collection and exponential-form losses. None
+of these is implemented here.
 
 The original 2021 actor instead uses critics for conditional first and second
 moments. The original 2023 and EX learners use conditional distributional risk.

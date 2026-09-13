@@ -195,27 +195,43 @@ class ExecutionConfig:
 
 @dataclass(frozen=True)
 class RiskConfig:
-    """Terminal objective; ES needs a global threshold learned separately."""
+    """Terminal objective; ES and entropy need a global threshold learned separately.
+
+    The entropic risk log E[exp(risk_aversion * loss)] / risk_aversion is the
+    exponential-utility certainty equivalent (Föllmer and Schied). Its optimized
+    certainty equivalent form (Ben-Tal and Teboulle 2007) shares the ES
+    threshold mechanics: minimizing over zeta returns the risk itself.
+    """
     alpha: float = 0.95
     objective: str = "es"
+    risk_aversion: float = 1.
 
     def __post_init__(self):
-        if self.objective not in ("es", "mse"):
-            raise ValueError("choose terminal es or mse")
+        if self.objective not in ("es", "mse", "entropy"):
+            raise ValueError("choose terminal es, mse or entropy")
         if not 0 < self.alpha < 1:
             raise ValueError("risk confidence must be between zero and one")
+        if self.risk_aversion <= 0:
+            raise ValueError("entropic risk aversion must be positive")
 
     def loss(self, losses, zeta=None):
         """Per-path loss; the learner averages over complete episodes."""
         if self.objective == "mse":
             return losses.square()
         if zeta is None:
-            raise ValueError("ES loss requires a global risk threshold")
+            raise ValueError("ES and entropic losses require a global risk threshold")
+        if self.objective == "entropy":
+            return zeta + (self.risk_aversion * (losses - zeta)).expm1() / self.risk_aversion
         return zeta + (losses - zeta).relu() / (1 - self.alpha)
 
+    def entropic_risk(self, losses):
+        """Pooled entropic risk of complete-episode losses, in loss units."""
+        scaled = self.risk_aversion * losses
+        return (scaled.logsumexp(0) - math.log(len(losses))) / self.risk_aversion
+
     def reward(self, losses, zeta=None):
-        """Gym reward: negative selected loss, or raw P&L before ES calibration."""
-        if self.objective == "es" and zeta is None:
+        """Gym reward: negative selected loss, or raw P&L before threshold calibration."""
+        if self.objective != "mse" and zeta is None:
             return -losses
         return -self.loss(losses, zeta)
 

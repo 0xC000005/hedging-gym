@@ -58,7 +58,7 @@ liability. A configuration is composed from independent parts:
 | `TimeGrid` | Number of decisions and annualization convention |
 | `PortfolioConfig` and `EuropeanOption` | Liability, its quantity and hedge options |
 | `ExecutionConfig` | Position limits, fees, minimum trades and lots |
-| `RiskConfig` | Expected-shortfall confidence level |
+| `RiskConfig` | Terminal objective: expected-shortfall confidence, MSE, or entropic risk aversion |
 | `HedgingConfig` | The complete, validated experiment configuration |
 
 For example, use GBM, a 20-day grid with 365-day annualization, a put liability,

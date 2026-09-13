@@ -203,7 +203,7 @@ def train_hybrid(train_bank, *, seed=7, updates=8, batch_size=32, hidden=(32, 32
                 approximate_kl = ((ratio - 1) - (new_scores - old_log_probs)).mean()
             if approximate_kl > .015:
                 break
-        if config.risk.objective == "es":
+        if config.risk.objective != "mse":
             threshold_loss = config.risk.loss(loss.detach(), zeta).mean()
             threshold_optimizer.zero_grad(set_to_none=True)
             threshold_loss.backward()

@@ -29,7 +29,7 @@ def empirical_es(values: torch.Tensor, alpha: float) -> float:
 @torch.no_grad()
 def evaluate_controller(controller: "Controller", bank, *, device=None, batch_size=1024, mode_seed=30001,
                         label="Controller evaluation", zeta=None, progress=False):
-    """Run complete shared tensor episodes; MSE and ES use all pooled path losses.
+    """Run complete shared tensor episodes; MSE, ES and entropic risk use all pooled path losses.
 
     Trade tapes retain the executed quantities. Batch size and order are part of the sampled-policy RNG contract, as in native evaluation.
     Timing includes transfers, controller calls, ledger execution and tapes;
@@ -87,11 +87,12 @@ def evaluate_controller(controller: "Controller", bank, *, device=None, batch_si
         effective_tail_paths95=.05*len(loss), effective_tail_paths99=.01*len(loss),
         evaluation_seconds=time.perf_counter()-started, device=str(device),
         timing_scope="Whole frozen evaluation: transfers, decisions, tensor ledger and CPU tapes; excludes bank generation/training")
-    metrics["objective"] = bank.config.risk.objective
-    metrics["objective_value"] = (metrics["mse"] if bank.config.risk.objective == "mse"
+    risk = bank.config.risk
+    metrics["objective"] = risk.objective
+    metrics["objective_value"] = (metrics["mse"] if risk.objective == "mse"
+                                  else float(risk.entropic_risk(loss.double())) if risk.objective == "entropy"
                                   else metrics["expected_shortfall"])
-    if zeta is not None and bank.config.risk.objective == "es":
+    if zeta is not None and risk.objective != "mse":
         threshold = float(zeta.detach().cpu()) if isinstance(zeta, torch.Tensor) else float(zeta)
-        metrics.update(zeta=threshold,
-            ru_at_training_zeta=float(bank.config.risk.loss(loss.double(), threshold).mean()))
+        metrics.update(zeta=threshold, ru_at_training_zeta=float(risk.loss(loss.double(), threshold).mean()))
     return metrics, raw

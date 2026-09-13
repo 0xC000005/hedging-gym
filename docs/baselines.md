@@ -20,6 +20,7 @@ ranking.
 | [Delta-variance](../src/hedging_gym/baselines/delta_variance.py) | [model sensitivities](benchmark.md). Local two-sensitivity control. | [baselines](../benchmarks/baselines.py); [variance-swap task](paper-benchmarks.md) | [Financial checks](validation.md) |
 | [Deep Hedging (`dh`)](../src/hedging_gym/baselines/deep_hedging.py) | [Bühler et al.](https://arxiv.org/abs/1802.03042v1). PyTorch implementation of pathwise policy training. | [baselines](../benchmarks/baselines.py), `--methods dh`; [qualify_policies](../benchmarks/qualify_policies.py) | [Objective mapping](baseline-methods.md) |
 | [No-transaction bands (`ntb`)](../src/hedging_gym/baselines/no_transaction_band.py) | [Imaki et al.](https://arxiv.org/abs/2103.01775v1), [PFHedge example](https://github.com/pfnet-research/pfhedge/blob/1fc08c73756bc6350f6a66977a5be97497d3bca0/README.md). Learned band construction with pathwise training. | [baselines](../benchmarks/baselines.py), `--methods ntb`; [qualify_policies](../benchmarks/qualify_policies.py) | [Objective mapping](baseline-methods.md) |
+| [Deep Bellman Hedging (`dbh`)](../src/hedging_gym/baselines/deep_bellman_hedging.py) | [Buehler, Murray and Wood](https://arxiv.org/abs/2207.00932v4). Equation-based actor-critic on the Deep Hedging actor with a monetary-utility Bellman target; no public author code. | [baselines](../benchmarks/baselines.py), `--methods dbh`; [qualify_deep_bellman](../benchmarks/qualify_deep_bellman.py) | [Objective mapping](baseline-methods.md#training-objectives-are-not-interchangeable) |
 | [Full-network fine-tuning (`finetune_dh`)](../src/hedging_gym/baselines/finetune_dh.py) | Updates all DH network weights on the new task. | [qualify_adaptation](../benchmarks/qualify_adaptation.py) | [Adaptation](fast-adaptation.md) |
 | [Adaptive Deep Hedging (`adaptive_dh`)](../src/hedging_gym/baselines/adaptive_deep_hedging.py) | [Schmid–Oeltz](https://arxiv.org/abs/2504.16436v1). Shared network with trainable task embeddings. | [qualify_adaptation](../benchmarks/qualify_adaptation.py) | [Adaptation](fast-adaptation.md) |
 | [Hull/Cao 2021 DDPG](../src/hedging_gym/baselines/hull_ddpg.py) | [Author code](https://github.com/rotmanfinhub/deep-hedging-research/tree/b4d031a185fe2547dd81ad7a67081f6dbe52c5bc). PyTorch reimplementation with disclosed corrections. | [qualify_hull_ddpg](../benchmarks/qualify_hull_ddpg.py), saved training/development banks | [Source objective](baseline-methods.md) |
@@ -84,8 +85,9 @@ env.close()
 
 For direct Deep Hedging, `deep_hedging.train(bank, ...)` returns a policy and
 training metadata; `deep_hedging.make_controller(policy)` connects it to
-`evaluate_controller`. No-transaction bands, QR-D4PG and EX-DRL follow the same
-pattern. Classical modules expose `make_controller()` without training.
+`evaluate_controller`. No-transaction bands, Deep Bellman Hedging
+(`train_deep_bellman`), QR-D4PG and EX-DRL follow the same pattern. Classical
+modules expose `make_controller()` without training.
 Adaptive DH and full-network fine-tuning expose `make_updater(policy, ...)` for
 their respective update rules. Upstream learners retain their own training APIs.
 

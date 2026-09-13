@@ -1,4 +1,5 @@
 """Configuration independence and regressions at the financial boundary."""
+import math
 from dataclasses import asdict, replace
 
 import pytest
@@ -30,6 +31,40 @@ def test_mse_objective_roundtrip_value_and_gradient():
     value.backward()
     torch.testing.assert_close(losses.grad, torch.tensor([-4./3, 0., 2.]))
     torch.testing.assert_close(restored.risk.reward(losses), -losses.square())
+
+
+def test_entropic_objective_threshold_form_and_closed_form():
+    config = benchmark_config(risk=RiskConfig(objective="entropy", risk_aversion=.5))
+    assert config_from_dict(asdict(config)) == config
+    losses = torch.tensor([-2., 0., 3.], dtype=torch.float64, requires_grad=True)
+    value = config.risk.loss(losses, 1.).mean()
+    expected = [1. + (math.exp(.5*(loss-1.))-1.)/.5 for loss in (-2., 0., 3.)]
+    torch.testing.assert_close(value, torch.tensor(sum(expected)/3, dtype=torch.float64))
+    value.backward()
+    torch.testing.assert_close(losses.grad, torch.tensor([math.exp(.5*(loss-1.))/3 for loss in (-2., 0., 3.)],
+                                                         dtype=torch.float64))
+    torch.testing.assert_close(config.risk.reward(losses), -losses)
+    with pytest.raises(ValueError, match="threshold"):
+        config.risk.loss(losses)
+    # Minimizing the threshold form over zeta returns the entropic risk, which
+    # for Gaussian losses is mean + risk_aversion * variance / 2.
+    sample = 2. + torch.randn(400000, generator=torch.Generator().manual_seed(3), dtype=torch.float64)
+    entropic = config.risk.entropic_risk(sample)
+    assert float(entropic) == pytest.approx(2.25, abs=5e-3)
+    torch.testing.assert_close(config.risk.loss(sample, entropic).mean(), entropic)
+    assert config.risk.loss(sample, entropic+.3).mean() > entropic
+    assert config.risk.loss(sample, entropic-.3).mean() > entropic
+    with pytest.raises(ValueError, match="risk aversion"):
+        RiskConfig(objective="entropy", risk_aversion=0.)
+
+
+def test_entropic_risk_matches_pfhedge_reference():
+    pfhedge = pytest.importorskip("pfhedge")
+    losses = torch.tensor([-2., 0., 3., .5], dtype=torch.float64)
+    for risk_aversion in (.25, 1., 4.):
+        risk = RiskConfig(objective="entropy", risk_aversion=risk_aversion)
+        reference = pfhedge.nn.EntropicRiskMeasure(a=risk_aversion)(-losses)
+        torch.testing.assert_close(risk.entropic_risk(losses), reference)
 
 
 def test_model_identity_and_market_only_simulation():
